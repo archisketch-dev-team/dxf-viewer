@@ -563,6 +563,7 @@ export class DxfViewerPixi {
             return;
         }
         const objects = new Batch(this, scene, batch).CreateObjects();
+
         for (const obj of objects) {
             this.scene.addChild(obj);
             const layer = obj._dxfViewerLayer ?? this.defaultLayer;
@@ -983,56 +984,49 @@ class Batch {
 
         let batchingKey = this.key.geometryType;
         const POINT_WIDTH = 100;
+
         function CreateObject(vertices, indices) {
             switch (batchingKey) {
                 case BatchingKey.GeometryType.POINTS:
                 case BatchingKey.GeometryType.POINT_INSTANCE:
-                    // TODO: Use instancing via shader.
-                    const geometry = new pixi.Geometry();
-                    geometry.addAttribute(
-                        "aPosition",
-                        [
-                            -POINT_WIDTH / 2,
-                            -POINT_WIDTH / 2,
-                            POINT_WIDTH / 2,
-                            -POINT_WIDTH / 2,
-                            POINT_WIDTH / 2,
-                            POINT_WIDTH / 2,
-                            -POINT_WIDTH / 2,
-                            POINT_WIDTH / 2,
-                        ], // Rectangle vertices
-                        2
-                    );
-                    geometry.addAttribute("aUV", [0, 0, 1, 0, 1, 1, 0, 1], 2);
-                    geometry.addIndex([0, 1, 2, 0, 2, 3]);
-                    const batchContainer = new pixi.Container();
+                    const pointContainer = new pixi.Container();
                     for (let i = 0; i < vertices.count; i += 1) {
-                        const mesh = new pixi.Mesh({ geometry });
-                        mesh.position.set(vertices.getX(i), vertices.getY(i));
-                        batchContainer.addChild(mesh);
+                        const point = new pixi.Sprite(pixi.Texture.WHITE);
+                        point.width = POINT_WIDTH;
+                        point.height = POINT_WIDTH;
+                        point.position.set(vertices.getX(i), vertices.getY(i));
+                        pointContainer.addChild(point);
                     }
-                    return batchContainer;
+                    return pointContainer;
                 case BatchingKey.GeometryType.LINES:
                 case BatchingKey.GeometryType.INDEXED_LINES:
-                    if (indices) {
-                        console.log(vertices, indices);
-                        return new pixi.Graphics();
-                    }
+                    // TODO: Needs to improve performance.
                     const graphics = new pixi.Graphics();
-                    for (let i = 0; i < vertices.count; i += 2) {
-                        graphics.moveTo(vertices.getX(i), vertices.getY(i));
-                        graphics.lineTo(
-                            vertices.getX(i + 1),
-                            vertices.getY(i + 1)
-                        );
+                    if (indices) {
+                        for (let i = 0; i < indices.count; i += 2) {
+                            const fromIndex = indices.getX(i);
+                            const toIndex = indices.getX(i + 1);
+                            const fromX = vertices.getX(fromIndex);
+                            const fromY = vertices.getY(fromIndex);
+                            const toX = vertices.getX(toIndex);
+                            const toY = vertices.getY(toIndex);
+                            graphics.moveTo(fromX, fromY);
+                            graphics.lineTo(toX, toY);
+                        }
+                    } else {
+                        for (let i = 0; i < vertices.count; i += 2) {
+                            graphics.moveTo(vertices.getX(i), vertices.getY(i));
+                            graphics.lineTo(
+                                vertices.getX(i + 1),
+                                vertices.getY(i + 1)
+                            );
+                        }
                     }
-                    graphics.stroke({ width: 10, color: 0xffffff });
+                    graphics.stroke({ width: 20, color: 0xffffff });
                     return graphics;
                 case BatchingKey.GeometryType.TRIANGLES:
                 case BatchingKey.GeometryType.INDEXED_TRIANGLES:
                     return new pixi.Graphics();
-                    // console.log("mesh", vertices, indices);
-                    break;
                 default:
                     break;
             }
