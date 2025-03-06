@@ -983,47 +983,160 @@ class Batch {
         );
 
         let batchingKey = this.key.geometryType;
-        const POINT_WIDTH = 100;
 
         function CreateObject(vertices, indices) {
             switch (batchingKey) {
                 case BatchingKey.GeometryType.POINTS:
                 case BatchingKey.GeometryType.POINT_INSTANCE:
-                    const pointContainer = new pixi.Container();
-                    for (let i = 0; i < vertices.count; i += 1) {
-                        const point = new pixi.Sprite(pixi.Texture.WHITE);
-                        point.width = POINT_WIDTH;
-                        point.height = POINT_WIDTH;
-                        point.position.set(vertices.getX(i), vertices.getY(i));
-                        pointContainer.addChild(point);
-                    }
-                    return pointContainer;
+                    // Sprite version.
+                    // const pointContainer = new pixi.Container();
+                    // for (let i = 0; i < vertices.count; i += 1) {
+                    //     const point = new pixi.Sprite(pixi.Texture.WHITE);
+                    //     point.width = POINT_WIDTH;
+                    //     point.height = POINT_WIDTH;
+                    //     point.position.set(vertices.getX(i), -vertices.getY(i));
+                    //     pointContainer.addChild(point);
+                    // }
+                    // return pointContainer;
+
+                    // Point List Shader Version.
+                    const pointGeometry = new pixi.Geometry({
+                        attributes: {
+                            position: new pixi.Buffer({
+                                data: new Float32Array(vertices.array),
+                                usage:
+                                    pixi.BufferUsage.VERTEX |
+                                    pixi.BufferUsage.COPY_DST,
+                            }),
+                        },
+                        instanceCount: 1,
+                        topology: "point-list",
+                    });
+                    instanceBatch?._SetInstanceTransformAttribute(
+                        pointGeometry
+                    );
+                    const pointShader = pixi.Shader.from({
+                        gl: {
+                            vertex: `
+                            in vec2 position;
+
+                            uniform mat3 uProjectionMatrix;
+                            uniform mat3 uWorldTransformMatrix;
+                            uniform mat3 uTransformMatrix;
+
+                            void main() {
+                                mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
+                                gl_Position = vec4((mvp * vec3(vec2(position.x, -position.y), 1.0)).xy, 0.0, 1.0);
+                                gl_PointSize = 4.0;
+                            }
+                            `,
+                            fragment: `
+                            void main() {
+                                // Draw the line in white.
+                                gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+                            }
+                            `,
+                        },
+                    });
+                    const pointMesh = new pixi.Mesh({
+                        geometry: pointGeometry,
+                        shader: pointShader,
+                    });
+                    return pointMesh;
+
                 case BatchingKey.GeometryType.LINES:
                 case BatchingKey.GeometryType.INDEXED_LINES:
-                    // TODO: Needs to improve performance.
-                    const graphics = new pixi.Graphics();
-                    if (indices) {
-                        for (let i = 0; i < indices.count; i += 2) {
-                            const fromIndex = indices.getX(i);
-                            const toIndex = indices.getX(i + 1);
-                            const fromX = vertices.getX(fromIndex);
-                            const fromY = vertices.getY(fromIndex);
-                            const toX = vertices.getX(toIndex);
-                            const toY = vertices.getY(toIndex);
-                            graphics.moveTo(fromX, fromY);
-                            graphics.lineTo(toX, toY);
-                        }
-                    } else {
-                        for (let i = 0; i < vertices.count; i += 2) {
-                            graphics.moveTo(vertices.getX(i), vertices.getY(i));
-                            graphics.lineTo(
-                                vertices.getX(i + 1),
-                                vertices.getY(i + 1)
-                            );
-                        }
+                    const lineStripGeometry = new pixi.Geometry({
+                        attributes: {
+                            position: new pixi.Buffer({
+                                data: new Float32Array(vertices.array),
+                                usage:
+                                    pixi.BufferUsage.VERTEX |
+                                    pixi.BufferUsage.COPY_DST,
+                            }),
+                        },
+                        indexBuffer: indices
+                            ? new pixi.Buffer({
+                                  data: new Uint16Array(indices.array),
+                                  usage: pixi.BufferUsage.INDEX,
+                              })
+                            : undefined,
+                        instanceCount: instanceBatch
+                            ? instanceBatch.transforms0.data.count
+                            : 1,
+                        topology: "line-list",
+                    });
+
+                    if (instanceBatch) {
+                        const offsetBuffer = new pixi.Buffer({
+                            data: new Float32Array(
+                                instanceBatch.transforms0.data.array
+                            ),
+                            usage:
+                                pixi.BufferUsage.VERTEX |
+                                pixi.BufferUsage.COPY_DST,
+                        });
+
+                        lineStripGeometry.addAttribute("positionOffset0", {
+                            buffer: offsetBuffer,
+                            size: 3,
+                            stride: 6 * Float32Array.BYTES_PER_ELEMENT,
+                            offset: 0,
+                            instance: true,
+                        });
+                        lineStripGeometry.addAttribute("positionOffset1", {
+                            buffer: offsetBuffer,
+                            size: 3,
+                            stride: 6 * Float32Array.BYTES_PER_ELEMENT,
+                            offset: 3 * Float32Array.BYTES_PER_ELEMENT,
+                            instance: true,
+                        });
                     }
-                    graphics.stroke({ width: 20, color: 0xffffff });
-                    return graphics;
+
+                    const instanceAttr = instanceBatch
+                        ? `
+                    in vec3 positionOffset0;
+                    in vec3 positionOffset1;
+                    `
+                        : "";
+
+                    const instanceTransform = instanceBatch
+                        ? `
+                    pos.xy = mat2(positionOffset0[0], positionOffset1[0],
+                          positionOffset0[1], positionOffset1[1]) * pos.xy +
+                     vec2(positionOffset0[2], positionOffset1[2]);
+                    `
+                        : "";
+
+                    const lineStripShader = pixi.Shader.from({
+                        gl: {
+                            vertex: `
+                            in vec2 position;
+                            ${instanceAttr}
+                            uniform mat3 uProjectionMatrix;
+                            uniform mat3 uWorldTransformMatrix;
+                            uniform mat3 uTransformMatrix;
+
+                            void main() {
+                                vec2 pos = vec2(position);
+                                ${instanceTransform}
+                                mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
+                                gl_Position = vec4((mvp * vec3(vec2(pos.x, -pos.y), 1.0)).xy, 0.0, 1.0);
+                            }
+                            `,
+                            fragment: `
+                            void main() {
+                                // Draw the line in white.
+                                gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+                            }
+                            `,
+                        },
+                    });
+                    const mesh = new pixi.Mesh({
+                        geometry: lineStripGeometry,
+                        shader: lineStripShader,
+                    });
+                    return mesh;
                 case BatchingKey.GeometryType.TRIANGLES:
                 case BatchingKey.GeometryType.INDEXED_TRIANGLES:
                     return new pixi.Graphics();
@@ -1045,14 +1158,26 @@ class Batch {
      * @param {InstancedBufferGeometry} geometry
      */
     _SetInstanceTransformAttribute(geometry) {
-        if (!geometry.isInstancedBufferGeometry) {
-            throw new Error("InstancedBufferGeometry expected");
-        }
+        // if (!geometry.isInstancedBufferGeometry) {
+        //     throw new Error("InstancedBufferGeometry expected");
+        // }
         if (this.key.geometryType === BatchingKey.GeometryType.POINT_INSTANCE) {
-            geometry.setAttribute("instanceTransform", this.transforms);
+            geometry.addAttribute(
+                "instanceTransform",
+                this.transforms.data.array,
+                this.transforms.itemSize
+            );
         } else {
-            geometry.setAttribute("instanceTransform0", this.transforms0);
-            geometry.setAttribute("instanceTransform1", this.transforms1);
+            geometry.addAttribute(
+                "instanceTransform0",
+                this.transforms0.data.array,
+                this.transforms0.itemSize
+            );
+            geometry.addAttribute(
+                "instanceTransform1",
+                this.transforms1.data.array,
+                this.transforms1.itemSize
+            );
         }
     }
 
