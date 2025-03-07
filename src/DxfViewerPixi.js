@@ -41,7 +41,6 @@ export class DxfViewerPixi {
         await this.application.init({
             width: options.canvasWidth,
             height: options.canvasHeight,
-            background: "#1099bb",
             backgroundColor: options.clearColor,
             backgroundAlpha: options.clearAlpha,
             depth: false,
@@ -69,7 +68,6 @@ export class DxfViewerPixi {
          * buffers layout. Also do not waste CPU on sorting which we do not need anyway.
          */
         renderer.sortObjects = false;
-        // renderer.setPixelRatio(window.devicePixelRatio);
 
         const camera = (this.camera = new three.OrthographicCamera(
             -1,
@@ -83,14 +81,6 @@ export class DxfViewerPixi {
         camera.position.x = 0;
         camera.position.y = 0;
 
-        this.simpleColorMaterial = [];
-        this.simplePointMaterial = [];
-        for (let i = 0; i < InstanceType.MAX; i++) {
-            this.simpleColorMaterial[i] = this._CreateSimpleColorMaterial(i);
-            this.simplePointMaterial[i] = this._CreateSimplePointMaterial(i);
-        }
-
-        // renderer.setClearColor(options.clearColor, options.clearAlpha);
         if (options.autoResize) {
             this.canvasWidth = domContainer.clientWidth;
             this.canvasHeight = domContainer.clientHeight;
@@ -101,7 +91,6 @@ export class DxfViewerPixi {
             this.resizeObserver = null;
         }
 
-        // renderer.setSize(this.canvasWidth, this.canvasHeight);
         domContainer.appendChild(this.application.canvas);
         this.canvas = this.application.canvas;
 
@@ -274,6 +263,7 @@ export class DxfViewerPixi {
         this._Emit("loaded");
 
         if (scene.bounds) {
+            // TODO: Not working
             this.FitView(
                 scene.bounds.minX - scene.origin.x,
                 scene.bounds.maxX - scene.origin.x,
@@ -291,7 +281,6 @@ export class DxfViewerPixi {
             );
         }
 
-        this._CreateControls();
         this.Render();
     }
 
@@ -481,37 +470,6 @@ export class DxfViewerPixi {
         }
     }
 
-    _CreateControls() {
-        if (this.controls) {
-            this.controls.dispose();
-        }
-        const controls = (this.controls = new OrbitControls(
-            this.camera,
-            this.canvas
-        ));
-        controls.enableRotate = false;
-        controls.mouseButtons = {
-            LEFT: three.MOUSE.PAN,
-            MIDDLE: three.MOUSE.DOLLY,
-        };
-        controls.touches = {
-            ONE: three.TOUCH.PAN,
-            TWO: three.TOUCH.DOLLY_PAN,
-        };
-        controls.zoomSpeed = 3;
-        controls.mouseZoomSpeedFactor = 0.05;
-        controls.target = new three.Vector3(
-            this.camera.position.x,
-            this.camera.position.y,
-            0
-        );
-        controls.addEventListener("change", () => {
-            this.Render();
-            this._Emit("viewChanged");
-        });
-        controls.update();
-    }
-
     _Emit(eventName, data = null) {
         this.canvas.dispatchEvent(
             new CustomEvent(EVENT_NAME_PREFIX + eventName, { detail: data })
@@ -569,182 +527,6 @@ export class DxfViewerPixi {
             const layer = obj._dxfViewerLayer ?? this.defaultLayer;
             layer.PushObject(obj);
         }
-    }
-
-    _GetSimpleColorMaterial(color, instanceType = InstanceType.NONE) {
-        const key = new MaterialKey(instanceType, null, color, 0);
-        let entry = this.materials.find({ key });
-        if (entry !== null) {
-            return entry.material;
-        }
-        entry = {
-            key,
-            material: this._CreateSimpleColorMaterialInstance(
-                color,
-                instanceType
-            ),
-        };
-        this.materials.insert(entry);
-        return entry.material;
-    }
-
-    _CreateSimpleColorMaterial(instanceType = InstanceType.NONE) {
-        const shaders = this._GenerateShaders(instanceType, false);
-        return new three.RawShaderMaterial({
-            uniforms: {
-                color: {
-                    value: new three.Color(0xff00ff),
-                },
-            },
-            vertexShader: shaders.vertex,
-            fragmentShader: shaders.fragment,
-            depthTest: false,
-            depthWrite: false,
-            glslVersion: three.GLSL3,
-            side: three.DoubleSide,
-        });
-    }
-
-    /** @param color {number} Color RGB numeric value.
-     * @param instanceType {number}
-     */
-    _CreateSimpleColorMaterialInstance(
-        color,
-        instanceType = InstanceType.NONE
-    ) {
-        const src = this.simpleColorMaterial[instanceType];
-        /* Should reuse compiled shaders. */
-        const m = src.clone();
-        m.uniforms.color = { value: new three.Color(color) };
-        return m;
-    }
-
-    _GetSimplePointMaterial(color, instanceType = InstanceType.NONE) {
-        const key = new MaterialKey(
-            instanceType,
-            BatchingKey.GeometryType.POINTS,
-            color,
-            0
-        );
-        let entry = this.materials.find({ key });
-        if (entry !== null) {
-            return entry.material;
-        }
-        entry = {
-            key,
-            material: this._CreateSimplePointMaterialInstance(
-                color,
-                this.options.pointSize,
-                instanceType
-            ),
-        };
-        this.materials.insert(entry);
-        return entry.material;
-    }
-
-    _CreateSimplePointMaterial(instanceType = InstanceType.NONE) {
-        const shaders = this._GenerateShaders(instanceType, true);
-        return new three.RawShaderMaterial({
-            uniforms: {
-                color: {
-                    value: new three.Color(0xff00ff),
-                },
-                pointSize: {
-                    value: 2,
-                },
-            },
-            vertexShader: shaders.vertex,
-            fragmentShader: shaders.fragment,
-            depthTest: false,
-            depthWrite: false,
-            glslVersion: three.GLSL3,
-        });
-    }
-
-    /** @param color {number} Color RGB numeric value.
-     * @param size {number} Rasterized point size in pixels.
-     * @param instanceType {number}
-     */
-    _CreateSimplePointMaterialInstance(
-        color,
-        size = 2,
-        instanceType = InstanceType.NONE
-    ) {
-        const src = this.simplePointMaterial[instanceType];
-        /* Should reuse compiled shaders. */
-        const m = src.clone();
-        m.uniforms.color = { value: new three.Color(color) };
-        m.uniforms.size = { value: size };
-        return m;
-    }
-
-    _GenerateShaders(instanceType, pointSize) {
-        const fullInstanceAttr =
-            instanceType === InstanceType.FULL
-                ? `
-            /* First row. */
-            in vec3 instanceTransform0;
-            /* Second row. */
-            in vec3 instanceTransform1;
-            `
-                : "";
-        const fullInstanceTransform =
-            instanceType === InstanceType.FULL
-                ? `
-            pos.xy = mat2(instanceTransform0[0], instanceTransform1[0],
-                          instanceTransform0[1], instanceTransform1[1]) * pos.xy +
-                     vec2(instanceTransform0[2], instanceTransform1[2]);
-            `
-                : "";
-
-        const pointInstanceAttr =
-            instanceType === InstanceType.POINT
-                ? `
-            in vec2 instanceTransform;
-            `
-                : "";
-        const pointInstanceTransform =
-            instanceType === InstanceType.POINT
-                ? `
-            pos.xy += instanceTransform;
-            `
-                : "";
-
-        const pointSizeUniform = pointSize ? "uniform float pointSize;" : "";
-        const pointSizeAssigment = pointSize ? "gl_PointSize = pointSize;" : "";
-
-        return {
-            vertex: `
-
-            precision highp float;
-            precision highp int;
-            in vec2 position;
-            ${fullInstanceAttr}
-            ${pointInstanceAttr}
-            uniform mat4 modelViewMatrix;
-            uniform mat4 projectionMatrix;
-            ${pointSizeUniform}
-
-            void main() {
-                vec4 pos = vec4(position, 0.0, 1.0);
-                ${fullInstanceTransform}
-                ${pointInstanceTransform}
-                gl_Position = projectionMatrix * modelViewMatrix * pos;
-                ${pointSizeAssigment}
-            }
-            `,
-            fragment: `
-
-            precision highp float;
-            precision highp int;
-            uniform vec3 color;
-            out vec4 fragColor;
-
-            void main() {
-                fragColor = vec4(color, 1.0);
-            }
-            `,
-        };
     }
 
     /** Ensure the color is contrast enough with current background color.
@@ -966,183 +748,118 @@ class Batch {
             ? instanceBatch._GetInstanceColor(this)
             : this.key.color;
 
-        /* INSERT layer (if specified) takes precedence over layer specified in block definition. */
-        const layer = instanceBatch?.layer ?? this.layer;
+        const r = (((color >> 16) & 0xff) / 255).toFixed(6);
+        const g = (((color >> 8) & 0xff) / 255).toFixed(6);
+        const b = ((color & 0xff) / 255).toFixed(6);
 
-        //XXX line type
-        const materialFactory =
-            this.key.geometryType === BatchingKey.GeometryType.POINTS ||
-            this.key.geometryType === BatchingKey.GeometryType.POINT_INSTANCE
-                ? this.viewer._GetSimplePointMaterial
-                : this.viewer._GetSimpleColorMaterial;
-
-        const material = materialFactory.call(
-            this.viewer,
-            this.viewer._TransformColor(color),
-            instanceBatch?.GetInstanceType() ?? InstanceType.NONE
-        );
-
-        let batchingKey = this.key.geometryType;
+        let geometry;
+        switch (this.key.geometryType) {
+            case BatchingKey.GeometryType.POINTS:
+            case BatchingKey.GeometryType.POINT_INSTANCE:
+                geometry = new pixi.Geometry({
+                    topology: "point-list",
+                });
+                break;
+            case BatchingKey.GeometryType.LINES:
+            case BatchingKey.GeometryType.INDEXED_LINES:
+                geometry = new pixi.Geometry({
+                    topology: "line-list",
+                });
+                break;
+            case BatchingKey.GeometryType.TRIANGLES:
+            case BatchingKey.GeometryType.INDEXED_TRIANGLES:
+                geometry = new pixi.Geometry({
+                    topology: "triangle-list",
+                });
+                break;
+            default:
+                break;
+        }
 
         function CreateObject(vertices, indices) {
-            switch (batchingKey) {
-                case BatchingKey.GeometryType.POINTS:
-                case BatchingKey.GeometryType.POINT_INSTANCE:
-                    // Sprite version.
-                    // const pointContainer = new pixi.Container();
-                    // for (let i = 0; i < vertices.count; i += 1) {
-                    //     const point = new pixi.Sprite(pixi.Texture.WHITE);
-                    //     point.width = POINT_WIDTH;
-                    //     point.height = POINT_WIDTH;
-                    //     point.position.set(vertices.getX(i), -vertices.getY(i));
-                    //     pointContainer.addChild(point);
-                    // }
-                    // return pointContainer;
-
-                    // Point List Shader Version.
-                    const pointGeometry = new pixi.Geometry({
-                        attributes: {
-                            position: new pixi.Buffer({
-                                data: new Float32Array(vertices.array),
-                                usage:
-                                    pixi.BufferUsage.VERTEX |
-                                    pixi.BufferUsage.COPY_DST,
-                            }),
-                        },
-                        instanceCount: 1,
-                        topology: "point-list",
-                    });
-                    instanceBatch?._SetInstanceTransformAttribute(
-                        pointGeometry
-                    );
-                    const pointShader = pixi.Shader.from({
-                        gl: {
-                            vertex: `
-                            in vec2 position;
-
-                            uniform mat3 uProjectionMatrix;
-                            uniform mat3 uWorldTransformMatrix;
-                            uniform mat3 uTransformMatrix;
-
-                            void main() {
-                                mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
-                                gl_Position = vec4((mvp * vec3(vec2(position.x, -position.y), 1.0)).xy, 0.0, 1.0);
-                                gl_PointSize = 4.0;
-                            }
-                            `,
-                            fragment: `
-                            void main() {
-                                // Draw the line in white.
-                                gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
-                            }
-                            `,
-                        },
-                    });
-                    const pointMesh = new pixi.Mesh({
-                        geometry: pointGeometry,
-                        shader: pointShader,
-                    });
-                    return pointMesh;
-
-                case BatchingKey.GeometryType.LINES:
-                case BatchingKey.GeometryType.INDEXED_LINES:
-                    const lineStripGeometry = new pixi.Geometry({
-                        attributes: {
-                            position: new pixi.Buffer({
-                                data: new Float32Array(vertices.array),
-                                usage:
-                                    pixi.BufferUsage.VERTEX |
-                                    pixi.BufferUsage.COPY_DST,
-                            }),
-                        },
-                        indexBuffer: indices
-                            ? new pixi.Buffer({
-                                  data: new Uint16Array(indices.array),
-                                  usage: pixi.BufferUsage.INDEX,
-                              })
-                            : undefined,
-                        instanceCount: instanceBatch
-                            ? instanceBatch.transforms0.data.count
-                            : 1,
-                        topology: "line-list",
-                    });
-
-                    if (instanceBatch) {
-                        const offsetBuffer = new pixi.Buffer({
-                            data: new Float32Array(
-                                instanceBatch.transforms0.data.array
-                            ),
-                            usage:
-                                pixi.BufferUsage.VERTEX |
-                                pixi.BufferUsage.COPY_DST,
-                        });
-
-                        lineStripGeometry.addAttribute("positionOffset0", {
-                            buffer: offsetBuffer,
-                            size: 3,
-                            stride: 6 * Float32Array.BYTES_PER_ELEMENT,
-                            offset: 0,
-                            instance: true,
-                        });
-                        lineStripGeometry.addAttribute("positionOffset1", {
-                            buffer: offsetBuffer,
-                            size: 3,
-                            stride: 6 * Float32Array.BYTES_PER_ELEMENT,
-                            offset: 3 * Float32Array.BYTES_PER_ELEMENT,
-                            instance: true,
-                        });
-                    }
-
-                    const instanceAttr = instanceBatch
-                        ? `
-                    in vec3 positionOffset0;
-                    in vec3 positionOffset1;
-                    `
-                        : "";
-
-                    const instanceTransform = instanceBatch
-                        ? `
-                    pos.xy = mat2(positionOffset0[0], positionOffset1[0],
-                          positionOffset0[1], positionOffset1[1]) * pos.xy +
-                     vec2(positionOffset0[2], positionOffset1[2]);
-                    `
-                        : "";
-
-                    const lineStripShader = pixi.Shader.from({
-                        gl: {
-                            vertex: `
-                            in vec2 position;
-                            ${instanceAttr}
-                            uniform mat3 uProjectionMatrix;
-                            uniform mat3 uWorldTransformMatrix;
-                            uniform mat3 uTransformMatrix;
-
-                            void main() {
-                                vec2 pos = vec2(position);
-                                ${instanceTransform}
-                                mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
-                                gl_Position = vec4((mvp * vec3(vec2(pos.x, -pos.y), 1.0)).xy, 0.0, 1.0);
-                            }
-                            `,
-                            fragment: `
-                            void main() {
-                                // Draw the line in white.
-                                gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
-                            }
-                            `,
-                        },
-                    });
-                    const mesh = new pixi.Mesh({
-                        geometry: lineStripGeometry,
-                        shader: lineStripShader,
-                    });
-                    return mesh;
-                case BatchingKey.GeometryType.TRIANGLES:
-                case BatchingKey.GeometryType.INDEXED_TRIANGLES:
-                    return new pixi.Graphics();
-                default:
-                    break;
+            if (geometry == null) {
+                const empty = new pixi.Sprite(pixi.Texture.EMPTY);
+                return empty;
             }
+            geometry.addAttribute("position", {
+                buffer: new pixi.Buffer({
+                    data: new Float32Array(vertices.array),
+                    usage: pixi.BufferUsage.VERTEX | pixi.BufferUsage.COPY_DST,
+                }),
+                size: 2,
+                stride: 2 * Float32Array.BYTES_PER_ELEMENT,
+                offset: 0,
+                usage: pixi.BufferUsage.VERTEX | pixi.BufferUsage.COPY_DST,
+            });
+            if (indices) {
+                geometry.addIndex(indices.array);
+            }
+            if (instanceBatch) {
+                geometry.instanceCount = instanceBatch.transforms0.data.count;
+                const offsetBuffer = new pixi.Buffer({
+                    data: new Float32Array(
+                        instanceBatch.transforms0.data.array
+                    ),
+                    usage: pixi.BufferUsage.VERTEX | pixi.BufferUsage.COPY_DST,
+                });
+
+                geometry.addAttribute("positionOffset0", {
+                    buffer: offsetBuffer,
+                    size: 3,
+                    stride: 6 * Float32Array.BYTES_PER_ELEMENT,
+                    offset: 0,
+                    instance: true,
+                });
+                geometry.addAttribute("positionOffset1", {
+                    buffer: offsetBuffer,
+                    size: 3,
+                    stride: 6 * Float32Array.BYTES_PER_ELEMENT,
+                    offset: 3 * Float32Array.BYTES_PER_ELEMENT,
+                    instance: true,
+                });
+            }
+
+            const instanceAttr = instanceBatch
+                ? `
+            in vec3 positionOffset0;
+            in vec3 positionOffset1;
+        `
+                : "";
+
+            const instanceTransform = instanceBatch
+                ? `
+            pos.xy = mat2(positionOffset0[0], positionOffset1[0], positionOffset0[1], positionOffset1[1]) * pos.xy + vec2(positionOffset0[2], positionOffset1[2]);
+        `
+                : "";
+
+            const shader = pixi.Shader.from({
+                gl: {
+                    vertex: `
+                in vec2 position;
+                ${instanceAttr}
+                uniform mat3 uProjectionMatrix;
+                uniform mat3 uWorldTransformMatrix;
+                uniform mat3 uTransformMatrix;
+
+                void main() {
+                    vec2 pos = vec2(position);
+                    ${instanceTransform}
+                    mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
+                    gl_Position = vec4((mvp * vec3(vec2(pos.x, -pos.y), 1.0)).xy, 0.0, 1.0);
+                    gl_PointSize = 2.0;
+                }
+                `,
+                    fragment: `
+                void main() {
+                    gl_FragColor = vec4(${r}, ${g}, ${b}, 1.0);
+                }
+                `,
+                },
+            });
+            return new pixi.Mesh({
+                geometry,
+                shader,
+            });
         }
 
         if (this.chunks) {
@@ -1158,9 +875,6 @@ class Batch {
      * @param {InstancedBufferGeometry} geometry
      */
     _SetInstanceTransformAttribute(geometry) {
-        // if (!geometry.isInstancedBufferGeometry) {
-        //     throw new Error("InstancedBufferGeometry expected");
-        // }
         if (this.key.geometryType === BatchingKey.GeometryType.POINT_INSTANCE) {
             geometry.addAttribute(
                 "instanceTransform",
