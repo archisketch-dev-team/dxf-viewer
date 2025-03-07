@@ -3,9 +3,7 @@ import * as pixi from "pixi.js";
 import { Viewport } from "pixi-viewport";
 import { BatchingKey } from "./BatchingKey.js";
 import { DxfWorker } from "./DxfWorker.js";
-import { MaterialKey } from "./MaterialKey.js";
 import { ColorCode, DxfScene } from "./DxfScene.js";
-import { OrbitControls } from "./OrbitControls.js";
 import { RBTree } from "./RBTree.js";
 
 /** Level in "message" events. */
@@ -69,18 +67,6 @@ export class DxfViewerPixi {
          */
         renderer.sortObjects = false;
 
-        const camera = (this.camera = new three.OrthographicCamera(
-            -1,
-            1,
-            1,
-            -1,
-            0.1,
-            2
-        ));
-        camera.position.z = 1;
-        camera.position.x = 0;
-        camera.position.y = 0;
-
         if (options.autoResize) {
             this.canvasWidth = domContainer.clientWidth;
             this.canvasHeight = domContainer.clientHeight;
@@ -102,15 +88,6 @@ export class DxfViewerPixi {
             );
             this.resizeObserver.observe(domContainer);
         }
-
-        this.canvas.addEventListener(
-            "pointerdown",
-            this._OnPointerEvent.bind(this)
-        );
-        this.canvas.addEventListener(
-            "pointerup",
-            this._OnPointerEvent.bind(this)
-        );
 
         this.Render();
 
@@ -135,9 +112,6 @@ export class DxfViewerPixi {
         return Boolean(this.renderer);
     }
 
-    /**
-     * @returns {three.WebGLRenderer | null} Returns the created Three.js renderer.
-     */
     GetRenderer() {
         return this.renderer;
     }
@@ -152,27 +126,9 @@ export class DxfViewerPixi {
 
     SetSize(width, height) {
         this._EnsureRenderer();
-
-        const hScale = width / this.canvasWidth;
-        const vScale = height / this.canvasHeight;
-
-        const cam = this.camera;
-        const centerX = (cam.left + cam.right) / 2;
-        const centerY = (cam.bottom + cam.top) / 2;
-        const camWidth = cam.right - cam.left;
-        const camHeight = cam.top - cam.bottom;
-        cam.left = centerX - (hScale * camWidth) / 2;
-        cam.right = centerX + (hScale * camWidth) / 2;
-        cam.bottom = centerY - (vScale * camHeight) / 2;
-        cam.top = centerY + (vScale * camHeight) / 2;
-        cam.updateProjectionMatrix();
-
         this.canvasWidth = width;
         this.canvasHeight = height;
         this.renderer.setSize(width, height);
-        if (this.controls) {
-            this.controls.update();
-        }
         this._Emit("resized", { width, height });
         this._Emit("viewChanged");
         this.Render();
@@ -324,11 +280,6 @@ export class DxfViewerPixi {
             this.worker.Destroy(true);
             this.worker = null;
         }
-        if (this.controls) {
-            this.controls.dispose();
-            this.controls = null;
-        }
-        // this.scene.clear(); // three.js code
         this.scene.children = []; // pixi counterpart
         for (const layer of this.layers.values()) {
             layer.Dispose();
@@ -365,22 +316,7 @@ export class DxfViewerPixi {
     }
 
     SetView(center, width) {
-        const aspect = this.canvasWidth / this.canvasHeight;
-        const height = width / aspect;
-        const cam = this.camera;
-        cam.left = -width / 2;
-        cam.right = width / 2;
-        cam.top = height / 2;
-        cam.bottom = -height / 2;
-        cam.zoom = 1;
-        cam.position.set(center.x, center.y, 1);
-        cam.rotation.set(0, 0, 0);
-        cam.updateMatrix();
-        cam.updateProjectionMatrix();
-        if (this.controls) {
-            this.controls.target.set(cam.position.x, cam.position.y, 0);
-            this.controls.update();
-        }
+        // TODO: Fit Screen
         this._Emit("viewChanged");
     }
 
@@ -399,16 +335,8 @@ export class DxfViewerPixi {
         this.SetView(center, width * (1 + padding));
     }
 
-    /** @return {Scene} three.js scene for the viewer. Can be used to add custom entities on the
-     *      scene. Remember to apply scene origin available via GetOrigin() method.
-     */
     GetScene() {
         return this.scene;
-    }
-
-    /** @return {OrthographicCamera} three.js camera for the viewer. */
-    GetCamera() {
-        return this.camera;
     }
 
     /** @return {Vector2} Scene origin in global drawing coordinates. */
@@ -478,29 +406,6 @@ export class DxfViewerPixi {
 
     _Message(message, level = MessageLevel.INFO) {
         this._Emit("message", { message, level });
-    }
-
-    _OnPointerEvent(e) {
-        const canvasRect = e.target.getBoundingClientRect();
-        const canvasCoord = {
-            x: e.clientX - canvasRect.left,
-            y: e.clientY - canvasRect.top,
-        };
-        this._Emit(e.type, {
-            domEvent: e,
-            canvasCoord,
-            position: this._CanvasToSceneCoord(canvasCoord.x, canvasCoord.y),
-        });
-    }
-
-    /** @return {{x,y}} Scene coordinate corresponding to the specified canvas pixel coordinates. */
-    _CanvasToSceneCoord(x, y) {
-        const v = new three.Vector3(
-            (x * 2) / this.canvasWidth - 1,
-            (-y * 2) / this.canvasHeight + 1,
-            1
-        ).unproject(this.camera);
-        return { x: v.x, y: v.y };
     }
 
     _OnResize(entry) {
