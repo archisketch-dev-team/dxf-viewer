@@ -36,7 +36,7 @@ export type DxfViewerPixiOptions = {
     canvasWidth?: number;
     canvasHeight?: number;
     autoResize?: boolean;
-    clearColor?: number;
+    clearColor?: number; // Use 0xRRGGBB format instead of THREE.Color
     clearAlpha?: number;
     canvasAlpha?: boolean;
     canvasPremultipliedAlpha?: boolean;
