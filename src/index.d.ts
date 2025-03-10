@@ -90,8 +90,7 @@ export declare class DxfViewer {
 }
 
 export declare class DxfViewerPixi {
-    constructor(domContainer: HTMLElement);
-    init(options: DxfViewerPixiOptions | null): Promise<void>;
+    constructor(domContainer: HTMLElement, options: DxfViewerPixiOptions | null);
     Clear(): void;
     Destroy(): void;
     FitView(
