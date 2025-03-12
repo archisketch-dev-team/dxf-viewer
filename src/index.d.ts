@@ -90,17 +90,10 @@ export declare class DxfViewer {
 }
 
 export declare class DxfViewerPixi {
-    constructor(domContainer: HTMLElement, options: DxfViewerPixiOptions | null);
+    constructor();
     Clear(): void;
     Destroy(): void;
-    FitView(
-        minX: number,
-        maxX: number,
-        minY: number,
-        maxY: number,
-        padding: number
-    ): void;
-    // GetCamera(): THREE.OrthographicCamera
+    GetScene(): PIXI.Container;
     GetCanvas(): HTMLCanvasElement;
     GetLayers(): Iterable<LayerInfo>;
     GetOrigin(): THREE.Vector2;
