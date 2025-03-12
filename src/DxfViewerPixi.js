@@ -19,60 +19,13 @@ export class DxfViewerPixi {
      *  have padding if auto-resize feature is used.
      * @param options Some options can be overridden if specified. See DxfViewerPixi.DefaultOptions.
      */
-    constructor(domContainer, options = null) {
-        this.options = Object.create(DxfViewerPixi.DefaultOptions);
-        if (options) {
-            Object.assign(this.options, options);
-        }
-        options = this.options;
-
-        this.clearColor = this.options.clearColor;
-
-        this.application = new pixi.Application({
-            width: options.canvasWidth,
-            height: options.canvasHeight,
-            backgroundColor: options.clearColor,
-            backgroundAlpha: options.clearAlpha,
-            depth: false,
-            antialias: options.antialias,
-            premultipliedAlpha: options.canvasPremultipliedAlpha,
-            preserveDrawingBuffer: options.preserveDrawingBuffer,
-            preference: "webgl",
-        });
-
-        const renderer = this.application.renderer;
-        this.renderer = renderer;
-
-        this.scene = this.application.stage;
+    constructor() {
+        this.scene = new pixi.Container();
 
         /* Prevent bounding spheres calculations which fails due to non-conventional geometry
          * buffers layout. Also do not waste CPU on sorting which we do not need anyway.
          */
-        renderer.sortObjects = false;
-
-        if (options.autoResize) {
-            this.canvasWidth = domContainer.clientWidth;
-            this.canvasHeight = domContainer.clientHeight;
-            domContainer.style.position = "relative";
-        } else {
-            this.canvasWidth = options.canvasWidth;
-            this.canvasHeight = options.canvasHeight;
-            this.resizeObserver = null;
-        }
-
-        domContainer.appendChild(this.application.view);
-        this.canvas = this.application.view;
-
-        domContainer.style.display = "block";
-        if (options.autoResize) {
-            this.canvas.style.position = "absolute";
-            this.resizeObserver = new ResizeObserver((entries) =>
-                this._OnResize(entries[0])
-            );
-            this.resizeObserver.observe(domContainer);
-        }
-
-        this.Render();
+        // renderer.sortObjects = false;
 
         /* Indexed by MaterialKey, value is {key, material}. */
         this.materials = new RBTree((m1, m2) => m1.key.Compare(m2.key));
@@ -85,6 +38,10 @@ export class DxfViewerPixi {
 
         /** Set during data loading. */
         this.worker = null;
+
+        this.colorCorrection = true;
+        this.clearColor = 0xffffff;
+        this.blackWhiteInversion = true;
     }
 
     /**
@@ -92,29 +49,11 @@ export class DxfViewerPixi {
      * (e.g. after wake up from sleep). In such case page should be reloaded.
      */
     HasRenderer() {
-        return Boolean(this.renderer);
-    }
-
-    GetRenderer() {
-        return this.renderer;
-    }
-
-    GetCanvas() {
-        return this.canvas;
+        return true;
     }
 
     GetDxf() {
         return this.parsedDxf;
-    }
-
-    SetSize(width, height) {
-        this._EnsureRenderer();
-        this.canvasWidth = width;
-        this.canvasHeight = height;
-        this.renderer.setSize(width, height);
-        this._Emit("resized", { width, height });
-        this._Emit("viewChanged");
-        this.Render();
     }
 
     /** Load DXF into the viewer. Old content is discarded, state is reset.
@@ -142,14 +81,13 @@ export class DxfViewerPixi {
         }
 
         this._EnsureRenderer();
-
-        this.Clear();
+        // this.Clear();
 
         this.worker = new DxfWorker(workerFactory ? workerFactory() : null);
         const { scene, dxf } = await this.worker.Load(
             url,
             fonts,
-            this.options,
+            { fileEncoding: 'utf-8' },
             progressCbk
         );
         await this.worker.Destroy();
@@ -198,34 +136,10 @@ export class DxfViewerPixi {
         for (const batch of scene.batches) {
             this._LoadBatch(scene, batch);
         }
-
-        this._Emit("loaded");
-
-        if (scene.bounds) {
-            // TODO: Not working
-            this.FitView(
-                scene.bounds.minX - scene.origin.x,
-                scene.bounds.maxX - scene.origin.x,
-                scene.bounds.minY - scene.origin.y,
-                scene.bounds.maxY - scene.origin.y
-            );
-        } else {
-            this._Message("Empty document", MessageLevel.WARN);
-        }
-
-        if (this.hasMissingChars) {
-            this._Message(
-                "Some characters cannot be properly displayed due to missing fonts",
-                MessageLevel.WARN
-            );
-        }
-
-        this.Render();
     }
 
     Render() {
         this._EnsureRenderer();
-        this.renderer.render(this.scene);
     }
 
     /** @return {Iterable<{name:String, color:number}>} List of layer names. */
@@ -271,9 +185,6 @@ export class DxfViewerPixi {
         this.blocks.clear();
         this.materials.each((e) => e.material.dispose());
         this.materials.clear();
-        this.SetView({ x: 0, y: 0 }, 2);
-        this._Emit("cleared");
-        this.Render();
     }
 
     /** Free all resources. The viewer object should not be used after this method was called. */
@@ -294,28 +205,6 @@ export class DxfViewerPixi {
         }
         this.simplePointMaterial = null;
         this.simpleColorMaterial = null;
-        this.renderer.dispose();
-        this.renderer = null;
-    }
-
-    SetView(center, width) {
-        // TODO: Fit Screen
-        this._Emit("viewChanged");
-    }
-
-    /** Set view to fit the specified bounds. */
-    FitView(minX, maxX, minY, maxY, padding = 0.1) {
-        const aspect = this.canvasWidth / this.canvasHeight;
-        let width = maxX - minX;
-        const height = maxY - minY;
-        const center = { x: minX + width / 2, y: minY + height / 2 };
-        if (height * aspect > width) {
-            width = height * aspect;
-        }
-        if (width <= Number.MIN_VALUE * 2) {
-            width = 1;
-        }
-        this.SetView(center, width * (1 + padding));
     }
 
     GetScene() {
@@ -400,10 +289,11 @@ export class DxfViewerPixi {
 
     _LoadBatch(scene, batch) {
         if (
-            batch.key.blockName !== null &&
+            batch.key.layerName === 'Defpoints' ||
+            (batch.key.blockName !== null &&
             batch.key.geometryType !==
                 BatchingKey.GeometryType.BLOCK_INSTANCE &&
-            batch.key.geometryType !== BatchingKey.GeometryType.POINT_INSTANCE
+            batch.key.geometryType !== BatchingKey.GeometryType.POINT_INSTANCE)
         ) {
             /* Block definition. */
             return;
@@ -423,8 +313,8 @@ export class DxfViewerPixi {
      */
     _TransformColor(color) {
         if (
-            !this.options.colorCorrection &&
-            !this.options.blackWhiteInversion
+            !this.colorCorrection &&
+            !this.blackWhiteInversion
         ) {
             return color;
         }
@@ -436,7 +326,7 @@ export class DxfViewerPixi {
         if (color === 0 && bkgLum <= 0.2) {
             return 0xffffff;
         }
-        if (!this.options.colorCorrection) {
+        if (!this.colorCorrection) {
             return color;
         }
         const fgLum = Luminance(color);
@@ -636,9 +526,11 @@ class Batch {
             ? instanceBatch._GetInstanceColor(this)
             : this.key.color;
 
-        const r = (((color >> 16) & 0xff) / 255).toFixed(6);
-        const g = (((color >> 8) & 0xff) / 255).toFixed(6);
-        const b = ((color & 0xff) / 255).toFixed(6);
+            const transformedColor = this.viewer._TransformColor(color);
+
+            const r = (((transformedColor >> 16) & 0xff) / 255).toFixed(6);
+            const g = (((transformedColor >> 8) & 0xff) / 255).toFixed(6);
+            const b = ((transformedColor & 0xff) / 255).toFixed(6);
 
         let draw_mode;
         switch (this.key.geometryType) {
