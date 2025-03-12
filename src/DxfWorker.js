@@ -169,11 +169,8 @@ export class DxfWorker {
                 if (progressCbk) {
                     progressCbk("font", 0, null)
                 }
-                const data = await fetch(url).then(response => response.arrayBuffer())
-                if (progressCbk) {
-                    progressCbk("prepare", 0, null)
-                }
-                return opentype.parse(data)
+
+                return opentype.load(url);
             }
         }
 
