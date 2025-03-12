@@ -42,6 +42,55 @@ export class DxfViewerPixi {
         this.colorCorrection = true;
         this.clearColor = 0xffffff;
         this.blackWhiteInversion = true;
+
+        // 비인스턴스드 셰이더 생성
+        const fragmentShader = `
+            uniform vec3 uColor;
+            
+            void main() {
+                gl_FragColor = vec4(uColor, 1.0);
+            }
+        `
+        this.shader = {
+            standard: pixi.Program.from(
+                // vertex shader
+                `
+                    attribute vec2 position;
+                    uniform mat3 translationMatrix;
+                    uniform mat3 projectionMatrix;
+                    
+                    void main() {
+                        vec2 pos = vec2(position);
+                        mat3 mvp = projectionMatrix * translationMatrix;
+                        gl_Position = vec4((mvp * vec3(vec2(pos.x, -pos.y), 1.0)).xy, 0.0, 1.0);
+                        gl_PointSize = 2.0;
+                    }
+                `,
+                fragmentShader
+            ),
+            // 인스턴스드 셰이더 생성
+            instanced: pixi.Program.from(
+                // vertex shader
+                `
+                    attribute vec2 position;
+                    attribute vec3 positionOffset0;
+                    attribute vec3 positionOffset1;
+    
+                    uniform mat3 translationMatrix;
+                    uniform mat3 projectionMatrix;
+                    
+                    void main() {
+                        vec2 pos = vec2(position);
+                        pos.xy = mat2(positionOffset0[0], positionOffset1[0], positionOffset0[1], positionOffset1[1]) * pos.xy + vec2(positionOffset0[2], positionOffset1[2]);
+                        mat3 mvp = projectionMatrix * translationMatrix;
+                        gl_Position = vec4((mvp * vec3(vec2(pos.x, -pos.y), 1.0)).xy, 0.0, 1.0);
+                        gl_PointSize = 2.0;
+                    }
+                `,
+                fragmentShader
+            )
+        };
+
     }
 
     /**
@@ -550,6 +599,11 @@ class Batch {
                 break;
         }
 
+        const shaderProgram = instanceBatch ? this.viewer.shader.instanced : this.viewer.shader.standard;
+        const shader = new pixi.Shader(shaderProgram, {
+            uColor: [r, g, b]
+        });
+
         function CreateObject(vertices, indices) {
             if (draw_mode == null) {
                 const empty = new pixi.Sprite(pixi.Texture.EMPTY);
@@ -594,43 +648,6 @@ class Batch {
                 );
             }
 
-            const instanceAttr = instanceBatch
-                ? `
-                attribute vec3 positionOffset0;
-                attribute vec3 positionOffset1;
-                `
-                : "";
-
-            const instanceTransform = instanceBatch
-                ? `
-                pos.xy = mat2(positionOffset0[0], positionOffset1[0], positionOffset0[1], positionOffset1[1]) * pos.xy + vec2(positionOffset0[2], positionOffset1[2]);
-                `
-                : "";
-
-            // TODO: Avoid duplicate shader if possible.
-            const shader = pixi.Shader.from(
-                // vertex shader
-                `
-                attribute vec2 position;
-                ${instanceAttr}
-                uniform mat3 translationMatrix;
-                uniform mat3 projectionMatrix;
-
-                void main() {
-                    vec2 pos = vec2(position);
-                    ${instanceTransform}
-                    mat3 mvp = projectionMatrix * translationMatrix;
-                    gl_Position = vec4((mvp * vec3(vec2(pos.x, -pos.y), 1.0)).xy, 0.0, 1.0);
-                    gl_PointSize = 2.0;
-                }
-                `,
-                // fragment shader
-                `
-                void main() {
-                    gl_FragColor = vec4(${r}, ${g}, ${b}, 1.0);
-                }
-                `
-            );
             return new pixi.Mesh(geometry, shader, null, draw_mode);
         }
 
