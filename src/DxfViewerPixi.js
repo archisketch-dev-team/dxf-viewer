@@ -91,6 +91,10 @@ export class DxfViewerPixi {
             )
         };
 
+        this.snapContext = {
+            points: [],
+            lines: [],
+        }
     }
 
     /**
@@ -348,7 +352,6 @@ export class DxfViewerPixi {
             return;
         }
         const objects = new Batch(this, scene, batch).CreateObjects();
-
         for (const obj of objects) {
             this.scene.addChild(obj);
             const layer = obj._dxfViewerLayer ?? this.defaultLayer;
@@ -570,6 +573,221 @@ class Batch {
         yield* this._CreateObjects(instanceBatch);
     }
 
+    _AddSnapPoints(vertices, instanceBatch) {
+        if (instanceBatch) {
+            // 인스턴싱된 각 라인의 실제 좌표를 계산하여 저장
+            const transforms0 = instanceBatch.transforms0.data.array;
+            const transforms1 = instanceBatch.transforms1.data.array;
+
+            // 각 인스턴스에 대해 반복
+            for (let t = 0; t < instanceBatch.transforms0.data.count; t += 1) {
+                const startIndex = t * instanceBatch.transforms0.data.stride;
+                // x
+                const m00 = transforms0[startIndex];
+                const m10 = transforms0[startIndex + 1];
+                const tx = transforms0[startIndex + 2];
+                // y
+                const m01 = transforms1[startIndex + 3];
+                const m11 = transforms1[startIndex + 4];
+                const ty = transforms1[startIndex + 5];
+                
+                const stride = vertices.itemSize;
+                for (let i = 0; i < vertices.array.length; i += stride) {
+                    const x1 = vertices.array[i];
+                    const y1 = vertices.array[i + 1];
+                    
+                    this.viewer.snapContext.points.push({
+                        x: m00 * x1 + m10 * y1 + tx,
+                        y: -(m01 * x1 + m11 * y1 + ty)
+                    });
+                }
+            }
+        } else {
+            /**
+             * Stride for a point is 2.
+             * `array = [p1.x, p1.y, p2.x, p2.y, ...];`
+             */
+            const stride = vertices.itemSize;
+            for (let i = 0; i < vertices.array.length; i += stride) {
+                this.viewer.snapContext.points.push({
+                    x: vertices.array[i],
+                    y: -vertices.array[i + 1],
+                })
+            }
+        }
+    }
+
+    _AddSnapLines(vertices, chunks, instanceBatch) {
+        if (chunks) {
+            chunks.forEach(chunk => {
+                if (instanceBatch) {
+                    // 인스턴싱된 각 라인의 실제 좌표를 계산하여 저장
+                    const transforms0 = instanceBatch.transforms0.data.array;
+                    const transforms1 = instanceBatch.transforms1.data.array;
+
+                    for (let t = 0; t < instanceBatch.transforms0.data.count; t += 1) {
+                        const startIndex = t * instanceBatch.transforms0.data.stride;
+                        // x
+                        const m00 = transforms0[startIndex];
+                        const m10 = transforms0[startIndex + 1];
+                        const tx = transforms0[startIndex + 2];
+                        // y
+                        const m01 = transforms1[startIndex + 3];
+                        const m11 = transforms1[startIndex + 4];
+                        const ty = transforms1[startIndex + 5];
+
+                        if (chunk.indices) {
+                            const stride = chunk.indices.itemSize * 2;
+                            for (let i = 0; i < chunk.indices.array.length; i += stride) {
+                                const x1 = chunk.vertices.array[chunk.indices.array[i] * stride];
+                                const y1 = chunk.vertices.array[chunk.indices.array[i] * stride + 1];
+                                const x2 = chunk.vertices.array[chunk.indices.array[i + 1] * stride];
+                                const y2 = chunk.vertices.array[chunk.indices.array[i + 1] * stride + 1];
+            
+                                // 변환 행렬 적용하여 실제 좌표 계산
+                                const transformedStart = {
+                                    x: m00 * x1 + m10 * y1 + tx,
+                                    y: -(m01 * x1 + m11 * y1 + ty)
+                                };
+                                
+                                const transformedEnd = {
+                                    x: m00 * x2 + m10 * y2 + tx,
+                                    y: -(m01 * x2 + m11 * y2 + ty)
+                                };
+                                
+                                this.viewer.snapContext.lines.push({
+                                    start: transformedStart,
+                                    end: transformedEnd
+                                });
+                            }
+                        } else {
+                            const stride = chunk.vertices.itemSize * 2;
+                            for (let i = 0; i < chunk.vertices.array.length; i += stride) {
+                                // 원래 좌표 추출
+                                const x1 = chunk.vertices.array[i];
+                                const y1 = chunk.vertices.array[i + 1];
+                                const x2 = chunk.vertices.array[i + 2];
+                                const y2 = chunk.vertices.array[i + 3];
+
+                                // 변환 행렬 적용하여 실제 좌표 계산
+                                const transformedStart = {
+                                    x: m00 * x1 + m10 * y1 + tx,
+                                    y: -(m01 * x1 + m11 * y1 + ty)
+                                };
+                                
+                                const transformedEnd = {
+                                    x: m00 * x2 + m10 * y2 + tx,
+                                    y: -(m01 * x2 + m11 * y2 + ty)
+                                };
+                                
+                                this.viewer.snapContext.lines.push({
+                                    start: transformedStart,
+                                    end: transformedEnd
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    if (chunk.indices) {
+                        const step = 2;
+                        const stride = chunk.indices.itemSize * step;
+                        for (let i = 0; i < chunk.indices.array.length; i += stride) {
+                            const start = {
+                                x: chunk.vertices.array[chunk.indices.array[i] * stride],
+                                y: -chunk.vertices.array[chunk.indices.array[i] * stride + 1],
+                            }
+                            const end = {
+                                x: chunk.vertices.array[chunk.indices.array[i + 1] * stride],
+                                y: -chunk.vertices.array[chunk.indices.array[i + 1] * stride + 1],
+                            }
+        
+                            this.viewer.snapContext.lines.push({ start, end });
+                        }
+                    } else {
+                        const stride = chunk.vertices.itemSize * 2;
+                        for (let i = 0; i < chunk.vertices.array.length; i += stride) {
+                            const start = {
+                                x: chunk.vertices.array[i],
+                                y: -chunk.vertices.array[i + 1],
+                            }
+                            const end = {
+                                x: chunk.vertices.array[i + 2],
+                                y: -chunk.vertices.array[i + 3],
+                            }
+        
+                            this.viewer.snapContext.lines.push({ start, end });
+                        }
+                    }
+                }
+            });
+        }
+
+        if (vertices) {
+            if (instanceBatch) {
+                // 인스턴싱된 각 라인의 실제 좌표를 계산하여 저장
+                // transforms0와 transforms1 데이터는 동일. transforms0는 x좌표, transforms1는 y좌표를 참조
+                const transforms0 = instanceBatch.transforms0.data.array;
+                const transforms1 = instanceBatch.transforms1.data.array;
+
+                // 각 인스턴스에 대해 반복
+                for (let t = 0; t < instanceBatch.transforms0.data.count; t += 1) {
+                    const startIndex = t * instanceBatch.transforms0.data.stride;
+                    // x
+                    const m00 = transforms0[startIndex];
+                    const m10 = transforms0[startIndex + 1];
+                    const tx = transforms0[startIndex + 2];
+                    // y
+                    const m01 = transforms1[startIndex + 3];
+                    const m11 = transforms1[startIndex + 4];
+                    const ty = transforms1[startIndex + 5];
+                    
+                    // 각 라인 세그먼트에 대해 반복
+                    const stride = vertices.itemSize * 2;
+                    for (let i = 0; i < vertices.array.length; i += stride) {
+                        // 원래 좌표 추출
+                        const x1 = vertices.array[i];
+                        const y1 = vertices.array[i + 1];
+                        const x2 = vertices.array[i + 2];
+                        const y2 = vertices.array[i + 3];
+                        
+                        // 변환 행렬 적용하여 실제 좌표 계산
+                        const transformedStart = {
+                            x: m00 * x1 + m10 * y1 + tx,
+                            y: -(m01 * x1 + m11 * y1 + ty)
+                        };
+                        
+                        const transformedEnd = {
+                            x: m00 * x2 + m10 * y2 + tx,
+                            y: -(m01 * x2 + m11 * y2 + ty)
+                        };
+                        
+                        this.viewer.snapContext.lines.push({
+                            start: transformedStart,
+                            end: transformedEnd
+                        });
+                    }
+                }
+            } else {
+                /**
+                 * array = [line1.start.x, line1.start.y, line1.end.x, line1.end.y, line2.start.x, line2.start.y, line2.end.x, line2.end.y];
+                 */
+                const stride = vertices.itemSize * 2;
+                for (let i = 0; i < vertices.array.length; i += stride) {
+                    const start = {
+                        x: vertices.array[i],
+                        y: -vertices.array[i + 1],
+                    }
+                    const end = {
+                        x: vertices.array[i + 2],
+                        y: -vertices.array[i + 3],
+                    }
+
+                    this.viewer.snapContext.lines.push({ start, end });
+                }
+            }
+        }
+    }
+
     *_CreateObjects(instanceBatch) {
         const color = instanceBatch
             ? instanceBatch._GetInstanceColor(this)
@@ -586,14 +804,26 @@ class Batch {
             case BatchingKey.GeometryType.POINTS:
             case BatchingKey.GeometryType.POINT_INSTANCE:
                 draw_mode = pixi.DRAW_MODES.POINTS;
+
+                // POINT에 instanceBatch가 있는 경우는 없었음.
+                this._AddSnapPoints(this.vertices, instanceBatch);
                 break;
             case BatchingKey.GeometryType.LINES:
             case BatchingKey.GeometryType.INDEXED_LINES:
                 draw_mode = pixi.DRAW_MODES.LINES;
+
+                this._AddSnapLines(this.vertices, this.chunks, instanceBatch);
                 break;
             case BatchingKey.GeometryType.TRIANGLES:
             case BatchingKey.GeometryType.INDEXED_TRIANGLES:
                 draw_mode = pixi.DRAW_MODES.TRIANGLES;
+
+                if (this.chunks) {
+                    this.chunks.forEach(chunk => {
+                        // point 스냅이기 때문에 `chunk.indices`는 사용하지 않음
+                        this._AddSnapPoints(chunk.vertices, instanceBatch);
+                    })
+                }
                 break;
             default:
                 break;
