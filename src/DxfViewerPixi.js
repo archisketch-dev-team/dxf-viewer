@@ -277,6 +277,10 @@ export class DxfViewerPixi {
         return this.bounds;
     }
 
+    GetSnapContext() {
+        return this.snapContext;
+    }
+
     /** Subscribe to the specified event. The following events are defined:
      *  * "loaded" - new scene loaded.
      *  * "cleared" - current scene cleared.

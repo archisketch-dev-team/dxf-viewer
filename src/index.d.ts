@@ -103,6 +103,10 @@ export declare class DxfViewerPixi {
         minX: number;
         minY: number;
     } | null;
+    GetSnapContext(): {
+        points: { x: number, y: number}[],
+        lines: {start: { x: number, y: number}, end: { x: number, y: number} }[],
+    }
     HasRenderer(): boolean;
     Load(params: DxfViewerLoadParams): Promise<void>;
     Render(): void;
