@@ -46,9 +46,10 @@ export class DxfViewerPixi {
         // 비인스턴스드 셰이더 생성
         const fragmentShader = `
             uniform vec3 uColor;
+            uniform float uAlpha;
             
             void main() {
-                gl_FragColor = vec4(uColor, 1.0);
+                gl_FragColor = vec4(uColor, uAlpha);
             }
         `
         this.shader = {
@@ -835,7 +836,8 @@ class Batch {
 
         const shaderProgram = instanceBatch ? this.viewer.shader.instanced : this.viewer.shader.standard;
         const shader = new pixi.Shader(shaderProgram, {
-            uColor: [r, g, b]
+            uColor: [r, g, b],
+            uAlpha: 1.0,
         });
 
         function CreateObject(vertices, indices) {
