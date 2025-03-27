@@ -123,6 +123,10 @@ export class DxfScene {
         this.pdSize = this.vars.get("PDSIZE") ?? 0
         this.isMetric = (this.vars.get("MEASUREMENT") ?? 1) == 1
 
+        if (this.vars.get('INSUNITS') !== 4) {
+            throw new Error('Only INSUNITS == 4 (millimeters) supported', { cause: 'UNSUPPORTED_UNITS' });
+        }
+
         if(dxf.tables && dxf.tables.layer) {
             for (const [, layer] of Object.entries(dxf.tables.layer.layers)) {
                 layer.displayName = ParseSpecialChars(layer.name)
