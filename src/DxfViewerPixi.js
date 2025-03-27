@@ -49,7 +49,7 @@ export class DxfViewerPixi {
             uniform float uAlpha;
             
             void main() {
-                gl_FragColor = vec4(uColor, uAlpha);
+                gl_FragColor = vec4(uColor * uAlpha, uAlpha);
             }
         `
         this.shader = {
