@@ -219,6 +219,16 @@ export class DxfScene {
                 return false
             }
         }
+
+        /**
+         * 오토캐드 예약어로 layerName에 defpoint 가 포함되면 렌더하지 않음
+         * 실제 dwg 데이터 있던 layer name 예제
+         * ex) Defpoints, DEFPOINTS, 원본-A1BL-단위세대-59A-확장형$2$DEFPOINTS-1, 원본-A2BL-공통-단위세대-95A$0$Defpoint
+         */
+        if (layerName.toLocaleLowerCase().includes("defpoint")) {
+            return false;
+        }
+
         return !this.options.suppressPaperSpace || !entity.inPaperSpace
     }
 

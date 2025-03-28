@@ -346,12 +346,10 @@ export class DxfViewerPixi {
     }
 
     _LoadBatch(scene, batch) {
-        if (
-            batch.key.layerName === 'Defpoints' ||
-            (batch.key.blockName !== null &&
+        if (batch.key.blockName !== null &&
             batch.key.geometryType !==
                 BatchingKey.GeometryType.BLOCK_INSTANCE &&
-            batch.key.geometryType !== BatchingKey.GeometryType.POINT_INSTANCE)
+            batch.key.geometryType !== BatchingKey.GeometryType.POINT_INSTANCE
         ) {
             /* Block definition. */
             return;
