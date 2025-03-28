@@ -280,16 +280,17 @@ export class DxfScene {
                      * to properly set hasMissingChars which allows displaying some warning in a
                      * viewer.
                      */
-                    return
+                    continue
                 }
             }
         }
+
         for (const block of this.blocks.values()) {
             if (block.data.hasOwnProperty("entities")) {
                 for (const entity of block.data.entities) {
                     if (IsTextEntity(entity)) {
                         if (!await ProcessEntity(entity)) {
-                            return
+                            continue
                         }
                     }
                 }
