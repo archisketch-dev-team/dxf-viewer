@@ -2845,7 +2845,7 @@ DxfScene.DefaultOptions = {
     /** Render meshes (3DFACE group, POLYLINE polyface mesh) as wireframe instead of solid. */
     wireframeMesh: false,
     /** Suppress paper-space entities when true (only model-space is rendered). */
-    suppressPaperSpace: false,
+    suppressPaperSpace: true,
     /** Text rendering options. */
     textOptions: TextRenderer.DefaultOptions,
 }
