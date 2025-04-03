@@ -353,6 +353,7 @@ export class DxfScene {
             renderEntities = this._DecomposeDimension(entity, blockCtx)
             break
         case "ATTRIB":
+        case "ATTDEF":
             renderEntities = this._DecomposeAttribute(entity, blockCtx)
             break
         case "HATCH":
