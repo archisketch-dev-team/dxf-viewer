@@ -1,5 +1,5 @@
 import * as three from "three";
-import * as pixi from "pixi.js";
+import * as pixi from "pixi.js-legacy";
 import { BatchingKey } from "./BatchingKey.js";
 import { DxfWorker } from "./DxfWorker.js";
 import { ColorCode, DxfScene } from "./DxfScene.js";

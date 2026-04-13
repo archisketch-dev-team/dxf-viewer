@@ -26,7 +26,7 @@
         "earcut": "^3.0.0",
         "loglevel": "^1.9.1",
         "opentype.js": "^1.3.4",
-        "pixi.js-legacy": "5.3.11",
+        "pixi.js-legacy": "^7.4.3",
         "three": "^0.161.0"
     },
     "devDependencies": {
