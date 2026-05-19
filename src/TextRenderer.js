@@ -146,6 +146,13 @@ export class TextRenderer {
         return block.GetCurrentPosition()
     }
 
+    ReplaceAutoCADSpecialChars(text) {
+        return text.replace(/%%[dD]/g, '°')
+                   .replace(/%%[pP]/g, '±')
+                   .replace(/%%[cC]/g, 'Ø')
+                   .replace(/%%(?![a-zA-Z])/g, '%'); // %% 단독 사용 시 %로 변환
+    }
+
     /**
      * @param {string} text
      * @param {{x,y}} startPos
@@ -163,7 +170,10 @@ export class TextRenderer {
     *Render({text, startPos, endPos, rotation = 0, widthFactor = 1, hAlign = 0, vAlign = 0,
              color, layer = null, fontSize}) {
         const block = new TextBlock(fontSize)
-        for (const char of text) {
+
+        const txt = this.ReplaceAutoCADSpecialChars(text);
+
+        for (const char of txt) {
             const shape = this._GetCharShape(char)
             if (!shape) {
                 continue

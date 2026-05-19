@@ -123,6 +123,10 @@ export class DxfScene {
         this.pdSize = this.vars.get("PDSIZE") ?? 0
         this.isMetric = (this.vars.get("MEASUREMENT") ?? 1) == 1
 
+        if (this.vars.get('INSUNITS') !== 4) {
+            throw new Error('Only INSUNITS == 4 (millimeters) supported', { cause: 'UNSUPPORTED_UNITS' });
+        }
+
         if(dxf.tables && dxf.tables.layer) {
             for (const [, layer] of Object.entries(dxf.tables.layer.layers)) {
                 layer.displayName = ParseSpecialChars(layer.name)
@@ -215,6 +219,16 @@ export class DxfScene {
                 return false
             }
         }
+
+        /**
+         * 오토캐드 예약어로 layerName에 defpoint 가 포함되면 렌더하지 않음
+         * 실제 dwg 데이터 있던 layer name 예제
+         * ex) Defpoints, DEFPOINTS, 원본-A1BL-단위세대-59A-확장형$2$DEFPOINTS-1, 원본-A2BL-공통-단위세대-95A$0$Defpoint
+         */
+        if (layerName.toLocaleLowerCase().includes("defpoint")) {
+            return false;
+        }
+
         return !this.options.suppressPaperSpace || !entity.inPaperSpace
     }
 
@@ -276,16 +290,17 @@ export class DxfScene {
                      * to properly set hasMissingChars which allows displaying some warning in a
                      * viewer.
                      */
-                    return
+                    continue
                 }
             }
         }
+
         for (const block of this.blocks.values()) {
             if (block.data.hasOwnProperty("entities")) {
                 for (const entity of block.data.entities) {
                     if (IsTextEntity(entity)) {
                         if (!await ProcessEntity(entity)) {
-                            return
+                            continue
                         }
                     }
                 }
@@ -338,6 +353,7 @@ export class DxfScene {
             renderEntities = this._DecomposeDimension(entity, blockCtx)
             break
         case "ATTRIB":
+        case "ATTDEF":
             renderEntities = this._DecomposeAttribute(entity, blockCtx)
             break
         case "HATCH":
@@ -1076,29 +1092,16 @@ export class DxfScene {
 
         let filteredBoundaryLoops = null
 
-        /* Make external loop first, outermost the second, all the rest in arbitrary order. Now is
-         * required only for solid infill.
-         */
-        boundaryLoops.sort((a, b) => {
-            if (a.isExternal != b.isExternal) {
-                return a.isExternal ? -1 : 1
-            }
-            if (a.isOutermost != b.isOutermost) {
-                return a.isOutermost ? -1 : 1
-            }
-            return 0
-        })
-
         if (style == HatchStyle.THROUGH_ENTIRE_AREA) {
             /* Leave only external loop. */
-            filteredBoundaryLoops = [boundaryLoops[0].vertices]
+            filteredBoundaryLoops = [{ vertices: boundaryLoops[0].vertices, isExternal: boundaryLoops[0].isExternal }]
 
         } else if (style == HatchStyle.OUTERMOST) {
             /* Leave external and outermost loop. */
             filteredBoundaryLoops = []
             for (const loop of boundaryLoops) {
                 if (loop.isExternal || loop.isOutermost) {
-                    filteredBoundaryLoops.push(loop.vertices)
+                    filteredBoundaryLoops.push({ vertices: loop.vertices, isExternal: loop.isExternal })
                 }
             }
             if (filteredBoundaryLoops.length == 0) {
@@ -1108,29 +1111,38 @@ export class DxfScene {
 
         if (!filteredBoundaryLoops) {
             /* Fall-back to full list. */
-            filteredBoundaryLoops = boundaryLoops.map(loop => loop.vertices)
+            filteredBoundaryLoops = boundaryLoops.map(loop => ({ vertices: loop.vertices, isExternal: loop.isExternal }))
         }
 
         if (entity.isSolid) {
-            const coords = this._TransformBoundaryLoop(filteredBoundaryLoops[0], transform)
-            const holes = []
-            for (let i = 1; i < filteredBoundaryLoops.length; i++) {
-                holes.push(coords.length / 2)
-                this._TransformBoundaryLoop(filteredBoundaryLoops[i], transform, coords)
+            const polygonLoops = filteredBoundaryLoops.filter(loop => loop.isExternal);
+            const holeLoops = filteredBoundaryLoops.filter(loop => !loop.isExternal);
+
+            for (const loop of polygonLoops) {
+                const coords = this._TransformBoundaryLoop(loop.vertices, transform);
+                
+                const holes = [];
+                holeLoops.forEach(hole => {
+                    holes.push(coords.length / 2);
+                    this._TransformBoundaryLoop(hole.vertices, transform, coords);
+                });
+
+                const indices = earcut(coords, holes);
+                const vertices = [];
+                vertices.push(...loop.vertices)
+                for (const hole of holeLoops) {
+                    vertices.push(...hole.vertices);
+                }
+
+                yield new Entity({
+                    type: Entity.Type.TRIANGLES,
+                    vertices, indices, layer, color
+                })
             }
-            const indices = earcut(coords, holes)
-            const vertices = []
-            for (const loop of filteredBoundaryLoops) {
-                vertices.push(...loop)
-            }
-            yield new Entity({
-                type: Entity.Type.TRIANGLES,
-                vertices, indices, layer, color
-            })
             return
         }
 
-        const calc = new HatchCalculator(filteredBoundaryLoops, style)
+        const calc = new HatchCalculator(filteredBoundaryLoops.map(b => b.vertices), style)
 
         let pattern = null
         if (entity.definitionLines) {
@@ -2844,7 +2856,7 @@ DxfScene.DefaultOptions = {
     /** Render meshes (3DFACE group, POLYLINE polyface mesh) as wireframe instead of solid. */
     wireframeMesh: false,
     /** Suppress paper-space entities when true (only model-space is rendered). */
-    suppressPaperSpace: false,
+    suppressPaperSpace: true,
     /** Text rendering options. */
     textOptions: TextRenderer.DefaultOptions,
 }

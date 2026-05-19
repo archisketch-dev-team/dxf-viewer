@@ -7,3 +7,4 @@ test-data/
 scratch/
 package-lock.json
 dist/
+.DS_Store

@@ -32,6 +32,24 @@ export type DxfViewerOptions = {
     fileEncoding?: string
 }
 
+export type DxfViewerPixiOptions = {
+    canvasWidth?: number;
+    canvasHeight?: number;
+    autoResize?: boolean;
+    clearColor?: number; // Use 0xRRGGBB format instead of THREE.Color
+    clearAlpha?: number;
+    canvasAlpha?: boolean;
+    canvasPremultipliedAlpha?: boolean;
+    antialias?: boolean;
+    colorCorrection?: boolean;
+    blackWhiteInversion?: boolean;
+    pointSize?: number;
+    sceneOptions?: DxfSceneOptions;
+    retainParsedDxf?: boolean;
+    preserveDrawingBuffer?: boolean;
+    fileEncoding?: string;
+};
+
 export type DxfViewerLoadParams = {
     url: string,
     fonts: string[] | null,
@@ -69,6 +87,34 @@ export declare class DxfViewer {
     ShowLayer(name: string, show: boolean): void
     Subscribe(eventName: EventName, eventHandler: (event: any) => void): void
     Unsubscribe(eventName: EventName, eventHandler: (event: any) => void): void
+}
+
+export declare class DxfViewerPixi {
+    constructor();
+    Clear(): void;
+    Destroy(): void;
+    GetScene(): PIXI.Container;
+    GetCanvas(): HTMLCanvasElement;
+    GetLayers(): Iterable<LayerInfo>;
+    GetOrigin(): THREE.Vector2;
+    GetBounds(): {
+        maxX: number;
+        maxY: number;
+        minX: number;
+        minY: number;
+    } | null;
+    GetSnapContext(): {
+        points: { x: number, y: number}[],
+        lines: {start: { x: number, y: number}, end: { x: number, y: number} }[],
+    }
+    HasRenderer(): boolean;
+    Load(params: DxfViewerLoadParams): Promise<void>;
+    Render(): void;
+    SetSize(width: number, height: number): void;
+    SetView(center: THREE.Vector3, width: number): void;
+    ShowLayer(name: string, show: boolean): void;
+    Subscribe(eventName: EventName, eventHandler: (event: any) => void): void;
+    Unsubscribe(eventName: EventName, eventHandler: (event: any) => void): void;
 }
 
 export declare namespace DxfViewer {
