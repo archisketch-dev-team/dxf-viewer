@@ -1,5 +1,5 @@
 import * as three from "three";
-import * as pixi from "pixi.js-legacy";
+import * as pixi from "pixi.js";
 import { BatchingKey } from "./BatchingKey.js";
 import { DxfWorker } from "./DxfWorker.js";
 import { ColorCode, DxfScene } from "./DxfScene.js";
@@ -43,53 +43,85 @@ export class DxfViewerPixi {
         this.clearColor = 0xffffff;
         this.blackWhiteInversion = true;
 
-        // 비인스턴스드 셰이더 생성
-        const fragmentShader = `
-            uniform vec3 uColor;
-            uniform float uAlpha;
-            
+        /* Pixi v8 WebGL shaders use GLSL ES 3.00. Global uniforms (uProjectionMatrix,
+         * uWorldTransformMatrix) are supplied automatically by Pixi via the `globalUniforms`
+         * UBO block for any custom Mesh shader. Per-draw color is supplied by us through the
+         * `uColorUniforms` resource group (see _CreateObjects). The vertex shader keeps the
+         * original Y-flip (pos.y negated) and point-size behavior.
+         */
+        const fragmentShader = /* glsl */ `
+            in float vAlpha;
+            in vec3 vColor;
+            out vec4 fragColor;
+
             void main() {
-                gl_FragColor = vec4(uColor * uAlpha, uAlpha);
+                fragColor = vec4(vColor * vAlpha, vAlpha);
             }
-        `
+        `;
         this.shader = {
-            standard: pixi.Program.from(
-                // vertex shader
-                `
-                    attribute vec2 position;
-                    uniform mat3 translationMatrix;
-                    uniform mat3 projectionMatrix;
-                    
+            standard: {
+                vertex: /* glsl */ `
+                    in vec2 position;
+
+                    uniform globalUniforms {
+                        mat3 uProjectionMatrix;
+                        mat3 uWorldTransformMatrix;
+                        vec4 uWorldColorAlpha;
+                        vec2 uResolution;
+                    };
+
+                    uniform uColorUniforms {
+                        vec3 uColor;
+                        float uAlpha;
+                    };
+
+                    out float vAlpha;
+                    out vec3 vColor;
+
                     void main() {
+                        vColor = uColor;
+                        vAlpha = uAlpha;
                         vec2 pos = vec2(position);
-                        mat3 mvp = projectionMatrix * translationMatrix;
+                        mat3 mvp = uProjectionMatrix * uWorldTransformMatrix;
                         gl_Position = vec4((mvp * vec3(vec2(pos.x, -pos.y), 1.0)).xy, 0.0, 1.0);
                         gl_PointSize = 2.0;
                     }
                 `,
-                fragmentShader
-            ),
-            // 인스턴스드 셰이더 생성
-            instanced: pixi.Program.from(
-                // vertex shader
-                `
-                    attribute vec2 position;
-                    attribute vec3 positionOffset0;
-                    attribute vec3 positionOffset1;
-    
-                    uniform mat3 translationMatrix;
-                    uniform mat3 projectionMatrix;
-                    
+                fragment: fragmentShader,
+            },
+            instanced: {
+                vertex: /* glsl */ `
+                    in vec2 position;
+                    in vec3 positionOffset0;
+                    in vec3 positionOffset1;
+
+                    uniform globalUniforms {
+                        mat3 uProjectionMatrix;
+                        mat3 uWorldTransformMatrix;
+                        vec4 uWorldColorAlpha;
+                        vec2 uResolution;
+                    };
+
+                    uniform uColorUniforms {
+                        vec3 uColor;
+                        float uAlpha;
+                    };
+
+                    out float vAlpha;
+                    out vec3 vColor;
+
                     void main() {
+                        vColor = uColor;
+                        vAlpha = uAlpha;
                         vec2 pos = vec2(position);
                         pos.xy = mat2(positionOffset0[0], positionOffset1[0], positionOffset0[1], positionOffset1[1]) * pos.xy + vec2(positionOffset0[2], positionOffset1[2]);
-                        mat3 mvp = projectionMatrix * translationMatrix;
+                        mat3 mvp = uProjectionMatrix * uWorldTransformMatrix;
                         gl_Position = vec4((mvp * vec3(vec2(pos.x, -pos.y), 1.0)).xy, 0.0, 1.0);
                         gl_PointSize = 2.0;
                     }
                 `,
-                fragmentShader
-            )
+                fragment: fragmentShader,
+            },
         };
 
         this.snapContext = {
@@ -231,7 +263,7 @@ export class DxfViewerPixi {
             this.worker.Destroy(true);
             this.worker = null;
         }
-        this.scene.children = []; // pixi counterpart
+        this.scene.removeChildren(); // pixi counterpart
         for (const layer of this.layers.values()) {
             layer.Dispose();
         }
@@ -809,28 +841,28 @@ class Batch {
 
             const transformedColor = this.viewer._TransformColor(color);
 
-            const r = (((transformedColor >> 16) & 0xff) / 255).toFixed(6);
-            const g = (((transformedColor >> 8) & 0xff) / 255).toFixed(6);
-            const b = ((transformedColor & 0xff) / 255).toFixed(6);
+            const r = ((transformedColor >> 16) & 0xff) / 255;
+            const g = ((transformedColor >> 8) & 0xff) / 255;
+            const b = (transformedColor & 0xff) / 255;
 
-        let draw_mode;
+        let topology;
         switch (this.key.geometryType) {
             case BatchingKey.GeometryType.POINTS:
             case BatchingKey.GeometryType.POINT_INSTANCE:
-                draw_mode = pixi.DRAW_MODES.POINTS;
+                topology = "point-list";
 
                 // POINT에 instanceBatch가 있는 경우는 없었음.
                 this._AddSnapPoints(this.vertices, instanceBatch);
                 break;
             case BatchingKey.GeometryType.LINES:
             case BatchingKey.GeometryType.INDEXED_LINES:
-                draw_mode = pixi.DRAW_MODES.LINES;
+                topology = "line-list";
 
                 this._AddSnapLines(this.vertices, this.chunks, instanceBatch);
                 break;
             case BatchingKey.GeometryType.TRIANGLES:
             case BatchingKey.GeometryType.INDEXED_TRIANGLES:
-                draw_mode = pixi.DRAW_MODES.TRIANGLES;
+                topology = "triangle-list";
 
                 if (this.chunks) {
                     this.chunks.forEach(chunk => {
@@ -843,67 +875,77 @@ class Batch {
                 break;
         }
 
-        const shaderProgram = instanceBatch ? this.viewer.shader.instanced : this.viewer.shader.standard;
-        const shader = new pixi.Shader(shaderProgram, {
-            uColor: [r, g, b],
-            uAlpha: 1.0,
+        const shaderSource = instanceBatch ? this.viewer.shader.instanced : this.viewer.shader.standard;
+        /* Per-draw color/alpha are supplied through a uniform group bound to the
+         * `uColorUniforms` block declared in the shader. uAlpha is mutated at runtime by
+         * consumers (opacity control) via `mesh.shader.resources.uColorUniforms.uniforms.uAlpha`.
+         */
+        const shader = pixi.Shader.from({
+            gl: shaderSource,
+            resources: {
+                uColorUniforms: new pixi.UniformGroup({
+                    uColor: { value: [r, g, b], type: "vec3<f32>" },
+                    uAlpha: { value: 1.0, type: "f32" },
+                }),
+            },
         });
 
         function CreateObject(vertices, indices) {
-            if (draw_mode == null) {
+            if (topology == null) {
                 const empty = new pixi.Sprite(pixi.Texture.EMPTY);
                 return empty;
             }
-            const geometry = new pixi.Geometry();
-            geometry.addAttribute(
-                "position",
-                vertices.array,
-                2,
-                false,
-                pixi.TYPES.FLOAT
-            );
-            if (indices) {
-                geometry.addIndex(indices.array);
-            }
+
+            const attributes = {
+                position: {
+                    buffer: vertices.array,
+                    format: "float32x2",
+                },
+            };
+
+            let instanceCount;
             if (instanceBatch) {
-                let offsetBuffer;
+                let offsetArray;
                 if (instanceBatch.transforms) {
-                    geometry.instanceCount = instanceBatch.transforms.count;
-                    offsetBuffer = new pixi.Buffer(
-                        instanceBatch.transforms.array
-                    );
+                    instanceCount = instanceBatch.transforms.count;
+                    offsetArray = instanceBatch.transforms.array;
                 } else if (instanceBatch.transforms0) {
-                    geometry.instanceCount = instanceBatch.transforms0.data.count;
-                    offsetBuffer = new pixi.Buffer(
-                        instanceBatch.transforms0.data.array
-                    );
+                    instanceCount = instanceBatch.transforms0.data.count;
+                    offsetArray = instanceBatch.transforms0.data.array;
                 }
 
-                if (offsetBuffer) {
-                    geometry.addAttribute(
-                        "positionOffset0",
-                        offsetBuffer,
-                        3,
-                        false,
-                        pixi.TYPES.FLOAT,
-                        6 * Float32Array.BYTES_PER_ELEMENT,
-                        0,
-                        true
-                    );
-                    geometry.addAttribute(
-                        "positionOffset1",
-                        offsetBuffer,
-                        3,
-                        false,
-                        pixi.TYPES.FLOAT,
-                        6 * Float32Array.BYTES_PER_ELEMENT,
-                        3 * Float32Array.BYTES_PER_ELEMENT,
-                        true
-                    );
+                if (offsetArray) {
+                    /* The two instance attributes interleave into a single shared buffer:
+                     * 6 floats per instance (two 3-float vectors). */
+                    const offsetBuffer = new pixi.Buffer({
+                        data: offsetArray,
+                        usage: pixi.BufferUsage.VERTEX,
+                    });
+                    attributes.positionOffset0 = {
+                        buffer: offsetBuffer,
+                        format: "float32x3",
+                        stride: 6 * Float32Array.BYTES_PER_ELEMENT,
+                        offset: 0,
+                        instance: true,
+                    };
+                    attributes.positionOffset1 = {
+                        buffer: offsetBuffer,
+                        format: "float32x3",
+                        stride: 6 * Float32Array.BYTES_PER_ELEMENT,
+                        offset: 3 * Float32Array.BYTES_PER_ELEMENT,
+                        instance: true,
+                    };
                 }
             }
 
-            return new pixi.Mesh(geometry, shader, null, draw_mode);
+            const geometry = new pixi.Geometry({
+                attributes,
+                indexBuffer: indices ? indices.array : undefined,
+                topology,
+                instanceCount: instanceCount ?? 1,
+            });
+
+            return new pixi.Mesh({ geometry, shader });
         }
 
         if (this.chunks) {
@@ -961,7 +1003,8 @@ class Layer {
 
     Dispose() {
         for (const obj of this.objects) {
-            obj.geometry.dispose();
+            /* EMPTY-sprite placeholders (null draw topology) have no geometry. */
+            obj.geometry?.destroy();
         }
         this.objects = null;
     }
