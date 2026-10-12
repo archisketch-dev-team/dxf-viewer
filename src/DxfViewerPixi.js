@@ -43,11 +43,33 @@ export class DxfViewerPixi {
         this.clearColor = 0xffffff;
         this.blackWhiteInversion = true;
 
-        /* Pixi v8 WebGL shaders use GLSL ES 3.00. Global uniforms (uProjectionMatrix,
-         * uWorldTransformMatrix) are supplied automatically by Pixi via the `globalUniforms`
-         * UBO block for any custom Mesh shader. Per-draw color is supplied by us through the
-         * `uColorUniforms` resource group (see _CreateObjects). The vertex shader keeps the
-         * original Y-flip (pos.y negated) and point-size behavior.
+        /* Pixi v8 custom Mesh shaders carry both a WebGL (`gl`, GLSL ES 3.00) and a WebGPU
+         * (`gpu`, WGSL) program so the same Mesh renders under either renderer. planner's main
+         * canvas requests `preference: 'webgpu'` (falling back to webgl), so without the `gpu`
+         * program these Meshes draw nothing on WebGPU.
+         *
+         * Uniform contract is identical across both backends (consumers stay renderer-agnostic):
+         *   - globalUniforms (uProjectionMatrix / uWorldTransformMatrix / ...) are supplied by
+         *     Pixi automatically. GL: `globalUniforms` UBO block. WGSL: struct var named
+         *     `globalUniforms` at @group(0) @binding(0) -> Pixi sets autoAssignGlobalUniforms
+         *     (GpuProgram.mjs:34, globalUniformsBit.mjs). We only consume uProjectionMatrix and
+         *     uWorldTransformMatrix; the other two members keep the UBO layout aligned with
+         *     Pixi's own block and are intentionally unused.
+         *   - uColorUniforms (uColor + uAlpha) is our per-draw group (see _CreateObjects). WGSL:
+         *     @group(1) @binding(0). The var is NOT named `localUniforms`, so Pixi does not
+         *     auto-assign it and instead binds our `resources.uColorUniforms`
+         *     (convention: localUniformBit.mjs @group(1); layout matching: generateLayoutHash.mjs).
+         *     uAlpha is mutated at runtime by consumers (opacity) via
+         *     `mesh.shader.resources.uColorUniforms.uniforms.uAlpha` — unchanged by renderer.
+         *
+         * Vertex attributes map by @location: position=0 (standard + instanced),
+         * positionOffset0=1, positionOffset1=2 (instanced only). GL binds attributes by name;
+         * WGSL binds by location, which Pixi reads from the entry-point struct
+         * (extractAttributesFromGpuProgram.mjs).
+         *
+         * Y-flip (pos.y negated) matches the GL program. gl_PointSize = 2.0 (used by `point-list`
+         * topology for DXF POINT entities) has NO WGSL/WebGPU equivalent — point-list primitives
+         * are always 1px. Points therefore render 1px under WebGPU; see report / _CreateObjects.
          */
         const fragmentShader = /* glsl */ `
             in float vAlpha;
@@ -58,9 +80,51 @@ export class DxfViewerPixi {
                 fragColor = vec4(vColor * vAlpha, vAlpha);
             }
         `;
+
+        /* WGSL fragment: shared by both standard and instanced programs. Reads interpolated
+         * vColor/vAlpha from the vertex stage; premultiplies alpha like the GL path. */
+        const wgslFragment = /* wgsl */ `
+            struct VSOutput {
+                @builtin(position) position: vec4<f32>,
+                @location(0) vColor: vec3<f32>,
+                @location(1) vAlpha: f32,
+            };
+
+            @fragment
+            fn mainFrag(in: VSOutput) -> @location(0) vec4<f32> {
+                return vec4<f32>(in.vColor * in.vAlpha, in.vAlpha);
+            }
+        `;
+
+        /* WGSL uniform blocks (shared header). globalUniforms @group(0) and uColorUniforms
+         * @group(1) — see the contract note above. */
+        const wgslUniforms = /* wgsl */ `
+            struct GlobalUniforms {
+                uProjectionMatrix: mat3x3<f32>,
+                uWorldTransformMatrix: mat3x3<f32>,
+                uWorldColorAlpha: vec4<f32>,
+                uResolution: vec2<f32>,
+            };
+
+            struct ColorUniforms {
+                uColor: vec3<f32>,
+                uAlpha: f32,
+            };
+
+            @group(0) @binding(0) var<uniform> globalUniforms: GlobalUniforms;
+            @group(1) @binding(0) var<uniform> uColorUniforms: ColorUniforms;
+
+            struct VSOutput {
+                @builtin(position) position: vec4<f32>,
+                @location(0) vColor: vec3<f32>,
+                @location(1) vAlpha: f32,
+            };
+        `;
+
         this.shader = {
             standard: {
-                vertex: /* glsl */ `
+                gl: {
+                    vertex: /* glsl */ `
                     in vec2 position;
 
                     uniform globalUniforms {
@@ -87,10 +151,35 @@ export class DxfViewerPixi {
                         gl_PointSize = 2.0;
                     }
                 `,
-                fragment: fragmentShader,
+                    fragment: fragmentShader,
+                },
+                gpu: {
+                    vertex: {
+                        entryPoint: "mainVert",
+                        source: /* wgsl */ `
+                            ${wgslUniforms}
+
+                            @vertex
+                            fn mainVert(@location(0) position: vec2<f32>) -> VSOutput {
+                                var out: VSOutput;
+                                out.vColor = uColorUniforms.uColor;
+                                out.vAlpha = uColorUniforms.uAlpha;
+                                let mvp = globalUniforms.uProjectionMatrix * globalUniforms.uWorldTransformMatrix;
+                                let clip = (mvp * vec3<f32>(position.x, -position.y, 1.0)).xy;
+                                out.position = vec4<f32>(clip, 0.0, 1.0);
+                                return out;
+                            }
+                        `,
+                    },
+                    fragment: {
+                        entryPoint: "mainFrag",
+                        source: wgslFragment,
+                    },
+                },
             },
             instanced: {
-                vertex: /* glsl */ `
+                gl: {
+                    vertex: /* glsl */ `
                     in vec2 position;
                     in vec3 positionOffset0;
                     in vec3 positionOffset1;
@@ -120,7 +209,42 @@ export class DxfViewerPixi {
                         gl_PointSize = 2.0;
                     }
                 `,
-                fragment: fragmentShader,
+                    fragment: fragmentShader,
+                },
+                gpu: {
+                    vertex: {
+                        entryPoint: "mainVert",
+                        source: /* wgsl */ `
+                            ${wgslUniforms}
+
+                            @vertex
+                            fn mainVert(
+                                @location(0) position: vec2<f32>,
+                                @location(1) positionOffset0: vec3<f32>,
+                                @location(2) positionOffset1: vec3<f32>,
+                            ) -> VSOutput {
+                                var out: VSOutput;
+                                out.vColor = uColorUniforms.uColor;
+                                out.vAlpha = uColorUniforms.uAlpha;
+                                /* Column-major mat2 matching the GL mat2(a,b,c,d) ctor:
+                                 * column0 = (off0.x, off1.x), column1 = (off0.y, off1.y). */
+                                let xform = mat2x2<f32>(
+                                    positionOffset0[0], positionOffset1[0],
+                                    positionOffset0[1], positionOffset1[1]
+                                );
+                                let pos = xform * position + vec2<f32>(positionOffset0[2], positionOffset1[2]);
+                                let mvp = globalUniforms.uProjectionMatrix * globalUniforms.uWorldTransformMatrix;
+                                let clip = (mvp * vec3<f32>(pos.x, -pos.y, 1.0)).xy;
+                                out.position = vec4<f32>(clip, 0.0, 1.0);
+                                return out;
+                            }
+                        `,
+                    },
+                    fragment: {
+                        entryPoint: "mainFrag",
+                        source: wgslFragment,
+                    },
+                },
             },
         };
 
@@ -876,12 +1000,14 @@ class Batch {
         }
 
         const shaderSource = instanceBatch ? this.viewer.shader.instanced : this.viewer.shader.standard;
-        /* Per-draw color/alpha are supplied through a uniform group bound to the
-         * `uColorUniforms` block declared in the shader. uAlpha is mutated at runtime by
-         * consumers (opacity control) via `mesh.shader.resources.uColorUniforms.uniforms.uAlpha`.
+        /* shaderSource carries both `gl` (GLSL) and `gpu` (WGSL) programs; spread so Pixi picks
+         * the one matching the active renderer. Per-draw color/alpha are supplied through a
+         * uniform group bound to the `uColorUniforms` block declared in both programs. uAlpha is
+         * mutated at runtime by consumers (opacity control) via
+         * `mesh.shader.resources.uColorUniforms.uniforms.uAlpha`.
          */
         const shader = pixi.Shader.from({
-            gl: shaderSource,
+            ...shaderSource,
             resources: {
                 uColorUniforms: new pixi.UniformGroup({
                     uColor: { value: [r, g, b], type: "vec3<f32>" },
