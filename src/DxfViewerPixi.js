@@ -48,17 +48,29 @@ export class DxfViewerPixi {
          * canvas requests `preference: 'webgpu'` (falling back to webgl), so without the `gpu`
          * program these Meshes draw nothing on WebGPU.
          *
-         * Uniform contract is identical across both backends (consumers stay renderer-agnostic):
-         *   - globalUniforms (uProjectionMatrix / uWorldTransformMatrix / ...) are supplied by
-         *     Pixi automatically. GL: `globalUniforms` UBO block. WGSL: struct var named
-         *     `globalUniforms` at @group(0) @binding(0) -> Pixi sets autoAssignGlobalUniforms
-         *     (GpuProgram.mjs:34, globalUniformsBit.mjs). We only consume uProjectionMatrix and
-         *     uWorldTransformMatrix; the other two members keep the UBO layout aligned with
-         *     Pixi's own block and are intentionally unused.
-         *   - uColorUniforms (uColor + uAlpha) is our per-draw group (see _CreateObjects). WGSL:
-         *     @group(1) @binding(0). The var is NOT named `localUniforms`, so Pixi does not
-         *     auto-assign it and instead binds our `resources.uColorUniforms`
-         *     (convention: localUniformBit.mjs @group(1); layout matching: generateLayoutHash.mjs).
+         * Uniform contract is identical across both backends at the data level (consumers stay
+         * renderer-agnostic), but the two Pixi renderers bind uniform groups DIFFERENTLY, so the
+         * shader source must match each backend's convention:
+         *   - globalUniforms (uProjectionMatrix / uWorldTransformMatrix) are supplied by Pixi
+         *     automatically.
+         *       WGSL: a struct var named `globalUniforms` at @group(0) @binding(0). Pixi's
+         *       GpuMeshAdapter sets autoAssignGlobalUniforms and binds its own global UniformGroup
+         *       as that bind group (GpuMeshAdapter.mjs; globalUniformsBit.mjs).
+         *       GL: Pixi's GlMeshAdaptor puts the SAME global UniformGroup at shader.groups[100],
+         *       but that group is NOT a UBO (ubo:false — GlobalUniformSystem._createUniforms),
+         *       so Pixi uploads its members as PLAIN uniforms by location via
+         *       GlUniformGroupSystem.updateUniformGroup (GenerateShaderSyncCode.mjs non-ubo
+         *       branch; globalUniformsBitGl declares them as plain `uniform mat3 ...`). A GLSL
+         *       `uniform globalUniforms { ... }` UBO BLOCK therefore gets no buffer bound and no
+         *       per-location upload -> block stays unbound ("used but unbound uniform buffer",
+         *       0 lines drawn). So the GL program must declare uProjectionMatrix /
+         *       uWorldTransformMatrix as plain uniforms, not a block.
+         *   - uColorUniforms (uColor + uAlpha) is our per-draw group (see _CreateObjects), passed
+         *     as `resources.uColorUniforms` = a plain (ubo:false) UniformGroup.
+         *       WGSL: @group(1) @binding(0), bound explicitly by Pixi because the resource name
+         *       matches the WGSL var (not auto-assigned since it is not named `localUniforms`).
+         *       GL: same non-ubo path as above — uColor / uAlpha are plain uniforms uploaded by
+         *       location, so the GL program declares them as plain uniforms too (no block).
          *     uAlpha is mutated at runtime by consumers (opacity) via
          *     `mesh.shader.resources.uColorUniforms.uniforms.uAlpha` — unchanged by renderer.
          *
@@ -127,17 +139,10 @@ export class DxfViewerPixi {
                     vertex: /* glsl */ `#version 300 es
                     in vec2 position;
 
-                    uniform globalUniforms {
-                        mat3 uProjectionMatrix;
-                        mat3 uWorldTransformMatrix;
-                        vec4 uWorldColorAlpha;
-                        vec2 uResolution;
-                    };
-
-                    uniform uColorUniforms {
-                        vec3 uColor;
-                        float uAlpha;
-                    };
+                    uniform mat3 uProjectionMatrix;
+                    uniform mat3 uWorldTransformMatrix;
+                    uniform vec3 uColor;
+                    uniform float uAlpha;
 
                     out float vAlpha;
                     out vec3 vColor;
@@ -184,17 +189,10 @@ export class DxfViewerPixi {
                     in vec3 positionOffset0;
                     in vec3 positionOffset1;
 
-                    uniform globalUniforms {
-                        mat3 uProjectionMatrix;
-                        mat3 uWorldTransformMatrix;
-                        vec4 uWorldColorAlpha;
-                        vec2 uResolution;
-                    };
-
-                    uniform uColorUniforms {
-                        vec3 uColor;
-                        float uAlpha;
-                    };
+                    uniform mat3 uProjectionMatrix;
+                    uniform mat3 uWorldTransformMatrix;
+                    uniform vec3 uColor;
+                    uniform float uAlpha;
 
                     out float vAlpha;
                     out vec3 vColor;
