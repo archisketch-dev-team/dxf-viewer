@@ -57,21 +57,31 @@ export class DxfViewerPixi {
          *       GpuMeshAdapter sets autoAssignGlobalUniforms and binds its own global UniformGroup
          *       as that bind group (GpuMeshAdapter.mjs; globalUniformsBit.mjs).
          *       GL: Pixi's GlMeshAdaptor puts the SAME global UniformGroup at shader.groups[100],
-         *       but that group is NOT a UBO (ubo:false — GlobalUniformSystem._createUniforms),
-         *       so Pixi uploads its members as PLAIN uniforms by location via
-         *       GlUniformGroupSystem.updateUniformGroup (GenerateShaderSyncCode.mjs non-ubo
-         *       branch; globalUniformsBitGl declares them as plain `uniform mat3 ...`). A GLSL
-         *       `uniform globalUniforms { ... }` UBO BLOCK therefore gets no buffer bound and no
-         *       per-location upload -> block stays unbound ("used but unbound uniform buffer",
+         *       but that group is NOT a UBO (ubo:false — UniformGroup.defaultOptions.ubo is false
+         *       and GlobalUniformSystem._createUniforms constructs the group without passing a ubo
+         *       option, so the default applies), so Pixi uploads its members as PLAIN uniforms by
+         *       location via GlUniformGroupSystem.updateUniformGroup (GenerateShaderSyncCode.mjs
+         *       non-ubo branch; globalUniformsBitGl declares them as plain `uniform mat3 ...`). A
+         *       GLSL `uniform globalUniforms { ... }` UBO BLOCK therefore gets no buffer bound and
+         *       no per-location upload -> block stays unbound ("used but unbound uniform buffer",
          *       0 lines drawn). So the GL program must declare uProjectionMatrix /
          *       uWorldTransformMatrix as plain uniforms, not a block.
-         *   - uColorUniforms (uColor + uAlpha) is our per-draw group (see _CreateObjects), passed
-         *     as `resources.uColorUniforms` = a plain (ubo:false) UniformGroup.
+         *   - uColorUniforms (uLineColor + uAlpha) is our per-draw group (see _CreateObjects),
+         *     passed as `resources.uColorUniforms` = a plain (ubo:false) UniformGroup.
          *       WGSL: @group(1) @binding(0), bound explicitly by Pixi because the resource name
          *       matches the WGSL var (not auto-assigned since it is not named `localUniforms`).
-         *       GL: same non-ubo path as above — uColor / uAlpha are plain uniforms uploaded by
-         *       location, so the GL program declares them as plain uniforms too (no block).
-         *     uAlpha is mutated at runtime by consumers (opacity) via
+         *       GL: same non-ubo path as above — uLineColor / uAlpha are plain uniforms uploaded
+         *       by location, so the GL program declares them as plain uniforms too (no block).
+         *     NAMING: the per-draw color uniform is `uLineColor`, NOT `uColor`. GlMeshAdaptor.execute
+         *     unconditionally binds Pixi's own localUniforms group at shader.groups[101] even for a
+         *     custom mesh shader, and that group declares `uColor` as a vec4<f32> (MeshPipe.mjs
+         *     localUniforms). generateUniformsSync resolves uniform locations by active-uniform NAME,
+         *     so a fork `uniform vec3 uColor` would share the location Pixi uploads `gl.uniform4f` to
+         *     every draw -> GL_INVALID_OPERATION (vec3 location, vec4 upload). Renaming to uLineColor
+         *     avoids the reserved localUniforms name. uProjectionMatrix / uWorldTransformMatrix are
+         *     also Pixi reserved names (globalUniforms) but reused DELIBERATELY — the fork reads those
+         *     exact globals, matching type (mat3). uAlpha is NOT a Pixi reserved name and is mutated
+         *     at runtime by consumers (opacity) via
          *     `mesh.shader.resources.uColorUniforms.uniforms.uAlpha` — unchanged by renderer.
          *
          * Vertex attributes map by @location: position=0 (standard + instanced),
@@ -119,7 +129,7 @@ export class DxfViewerPixi {
             };
 
             struct ColorUniforms {
-                uColor: vec3<f32>,
+                uLineColor: vec3<f32>,
                 uAlpha: f32,
             };
 
@@ -141,14 +151,14 @@ export class DxfViewerPixi {
 
                     uniform mat3 uProjectionMatrix;
                     uniform mat3 uWorldTransformMatrix;
-                    uniform vec3 uColor;
+                    uniform vec3 uLineColor;
                     uniform float uAlpha;
 
                     out float vAlpha;
                     out vec3 vColor;
 
                     void main() {
-                        vColor = uColor;
+                        vColor = uLineColor;
                         vAlpha = uAlpha;
                         vec2 pos = vec2(position);
                         mat3 mvp = uProjectionMatrix * uWorldTransformMatrix;
@@ -167,7 +177,7 @@ export class DxfViewerPixi {
                             @vertex
                             fn mainVert(@location(0) position: vec2<f32>) -> VSOutput {
                                 var out: VSOutput;
-                                out.vColor = uColorUniforms.uColor;
+                                out.vColor = uColorUniforms.uLineColor;
                                 out.vAlpha = uColorUniforms.uAlpha;
                                 let mvp = globalUniforms.uProjectionMatrix * globalUniforms.uWorldTransformMatrix;
                                 let clip = (mvp * vec3<f32>(position.x, -position.y, 1.0)).xy;
@@ -191,14 +201,14 @@ export class DxfViewerPixi {
 
                     uniform mat3 uProjectionMatrix;
                     uniform mat3 uWorldTransformMatrix;
-                    uniform vec3 uColor;
+                    uniform vec3 uLineColor;
                     uniform float uAlpha;
 
                     out float vAlpha;
                     out vec3 vColor;
 
                     void main() {
-                        vColor = uColor;
+                        vColor = uLineColor;
                         vAlpha = uAlpha;
                         vec2 pos = vec2(position);
                         pos.xy = mat2(positionOffset0[0], positionOffset1[0], positionOffset0[1], positionOffset1[1]) * pos.xy + vec2(positionOffset0[2], positionOffset1[2]);
@@ -222,7 +232,7 @@ export class DxfViewerPixi {
                                 @location(2) positionOffset1: vec3<f32>,
                             ) -> VSOutput {
                                 var out: VSOutput;
-                                out.vColor = uColorUniforms.uColor;
+                                out.vColor = uColorUniforms.uLineColor;
                                 out.vAlpha = uColorUniforms.uAlpha;
                                 /* Column-major mat2 matching the GL mat2(a,b,c,d) ctor:
                                  * column0 = (off0.x, off1.x), column1 = (off0.y, off1.y). */
@@ -1008,7 +1018,7 @@ class Batch {
             ...shaderSource,
             resources: {
                 uColorUniforms: new pixi.UniformGroup({
-                    uColor: { value: [r, g, b], type: "vec3<f32>" },
+                    uLineColor: { value: [r, g, b], type: "vec3<f32>" },
                     uAlpha: { value: 1.0, type: "f32" },
                 }),
             },
