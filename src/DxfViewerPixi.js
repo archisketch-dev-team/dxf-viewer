@@ -1064,12 +1064,30 @@ class Batch {
                 }
             }
 
+            /* WebGPU requires GPUBuffer sizes to be a multiple of 4 when created with
+             * mappedAtCreation (Pixi always does for index/vertex data — see Buffer.descriptor
+             * + GpuBufferSystem.createGPUBuffer, which do NOT round the size up). A Uint16 index
+             * buffer with an odd element count has a byteLength of 2 (mod 4), so createBuffer
+             * throws "size is not a multiple of 4". WebGL has no such constraint, which is why
+             * this only surfaces under the WebGPU renderer. Pad the index data to a 4-byte
+             * boundary and tell the geometry how many indices to actually draw via indexCount, so
+             * the pad element is never rendered. This is renderer-agnostic: both GpuEncoderSystem
+             * (drawIndexed) and GlGeometrySystem (drawElements) resolve the draw count as
+             * `size || geometry.indexCount || indexBuffer.data.length`. */
+            const indexArray = indices
+                ? AlignIndexBufferTo4Bytes(indices.array)
+                : undefined;
+
             const geometry = new pixi.Geometry({
                 attributes,
-                indexBuffer: indices ? indices.array : undefined,
+                indexBuffer: indexArray,
                 topology,
                 instanceCount: instanceCount ?? 1,
             });
+            if (indices) {
+                /* Real index count — guards against the padding element being drawn. */
+                geometry.indexCount = indices.array.length;
+            }
 
             return new pixi.Mesh({ geometry, shader });
         }
@@ -1149,6 +1167,26 @@ class Block {
 
 /** Custom viewer event names are prefixed with this string. */
 const EVENT_NAME_PREFIX = "__dxf_";
+
+/**
+ * Pad a Uint16 index array so its byteLength is a multiple of 4, as WebGPU requires for a
+ * GPUBuffer created with `mappedAtCreation` (which Pixi always uses for geometry data). An odd
+ * element count makes the byteLength 2 (mod 4); appending one zero element rounds it up. Even
+ * counts (and non-Uint16 arrays, whose element size already divides 4) are returned unchanged so
+ * no copy is made. The appended element is never drawn because the caller sets
+ * `geometry.indexCount` to the real index count. Pure function.
+ * @param {Uint16Array|Uint32Array} indexArray
+ * @return {Uint16Array|Uint32Array}
+ */
+function AlignIndexBufferTo4Bytes(indexArray) {
+    if (indexArray.byteLength % 4 === 0) {
+        return indexArray;
+    }
+    /* Only an odd-length Uint16Array reaches here (2 bytes/element). */
+    const padded = new Uint16Array(indexArray.length + 1);
+    padded.set(indexArray);
+    return padded;
+}
 
 /** Transform sRGB color component to linear color space. */
 function LinearColor(c) {
