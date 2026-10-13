@@ -71,7 +71,7 @@ export class DxfViewerPixi {
          * topology for DXF POINT entities) has NO WGSL/WebGPU equivalent — point-list primitives
          * are always 1px. Points therefore render 1px under WebGPU; see report / _CreateObjects.
          */
-        const fragmentShader = /* glsl */ `
+        const fragmentShader = /* glsl */ `#version 300 es
             in float vAlpha;
             in vec3 vColor;
             out vec4 fragColor;
@@ -124,7 +124,7 @@ export class DxfViewerPixi {
         this.shader = {
             standard: {
                 gl: {
-                    vertex: /* glsl */ `
+                    vertex: /* glsl */ `#version 300 es
                     in vec2 position;
 
                     uniform globalUniforms {
@@ -179,7 +179,7 @@ export class DxfViewerPixi {
             },
             instanced: {
                 gl: {
-                    vertex: /* glsl */ `
+                    vertex: /* glsl */ `#version 300 es
                     in vec2 position;
                     in vec3 positionOffset0;
                     in vec3 positionOffset1;
