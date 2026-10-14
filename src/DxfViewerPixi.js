@@ -66,12 +66,35 @@ export class DxfViewerPixi {
          *       no per-location upload -> block stays unbound ("used but unbound uniform buffer",
          *       0 lines drawn). So the GL program must declare uProjectionMatrix /
          *       uWorldTransformMatrix as plain uniforms, not a block.
-         *   - uColorUniforms (uLineColor + uAlpha) is our per-draw group (see _CreateObjects),
+         *   - localUniforms (uTransformMatrix / uColor / uRound) is Pixi's PER-MESH group, carrying
+         *     each Mesh's groupTransform (= the accumulated world transform of its container, e.g.
+         *     OverlayDxf2's `dxfContainer.position.set(origin.x, -origin.y)`). MeshPipe.execute sets
+         *     `localUniforms.uniforms.uTransformMatrix = mesh.groupTransform` for EVERY mesh, custom
+         *     shader included (MeshPipe.mjs). globalUniforms.uWorldTransformMatrix only holds the
+         *     render-group transform, NOT individual container transforms (GlobalUniformSystem.bind),
+         *     so a shader that reads only the globals ignores the per-mesh transform and renders the
+         *     DXF offset by `origin` from where snapContext places its snap points (which OverlayDxf2
+         *     builds in world space by adding origin). The clip transform must therefore be
+         *     `uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix`.
+         *       WGSL: a struct var named `localUniforms` at @group(1) @binding(0) whose layout
+         *       MATCHES Pixi's own (uTransformMatrix: mat3x3, uColor: vec4, uRound: f32 — MeshPipe
+         *       localUniforms). GpuMeshAdapter sets autoAssignLocalUniforms (true because layout[1]
+         *       is named `localUniforms`) and binds Pixi's localUniforms UniformGroup as that bind
+         *       group (GpuMeshAdapter.mjs; GpuProgram.mjs autoAssignLocalUniforms). The fork reads
+         *       only uTransformMatrix; uColor/uRound are declared to match the struct but unused.
+         *       GL: GlMeshAdaptor.execute unconditionally binds Pixi's localUniforms group at
+         *       shader.groups[101] (even for a custom shader), uploaded as PLAIN uniforms by name
+         *       (localUniformBitGl declares `uniform mat3 uTransformMatrix`), so the GL program
+         *       declares `uniform mat3 uTransformMatrix` and reads it directly.
+         *   - uColorUniforms (uLineColor + uAlpha) is our per-draw color group (see _CreateObjects),
          *     passed as `resources.uColorUniforms` = a plain (ubo:false) UniformGroup.
-         *       WGSL: @group(1) @binding(0), bound explicitly by Pixi because the resource name
-         *       matches the WGSL var (not auto-assigned since it is not named `localUniforms`).
+         *       WGSL: @group(2) @binding(0) — moved off @group(1) because that group is now Pixi's
+         *       auto-assigned localUniforms (above). group(2) is free (the fork binds no texture, so
+         *       Pixi's texture group is unused). Bound explicitly by Pixi because the resource name
+         *       `uColorUniforms` matches the WGSL var (Shader.mjs resources path), not auto-assigned.
          *       GL: same non-ubo path as above — uLineColor / uAlpha are plain uniforms uploaded
-         *       by location, so the GL program declares them as plain uniforms too (no block).
+         *       by location, so the GL program declares them as plain uniforms too (no block). GL has
+         *       no bind-group concept, so the color group's WGSL group number does not affect GL.
          *     NAMING: the per-draw color uniform is `uLineColor`, NOT `uColor`. GlMeshAdaptor.execute
          *     unconditionally binds Pixi's own localUniforms group at shader.groups[101] even for a
          *     custom mesh shader, and that group declares `uColor` as a vec4<f32> (MeshPipe.mjs
@@ -118,8 +141,9 @@ export class DxfViewerPixi {
             }
         `;
 
-        /* WGSL uniform blocks (shared header). globalUniforms @group(0) and uColorUniforms
-         * @group(1) — see the contract note above. */
+        /* WGSL uniform blocks (shared header). globalUniforms @group(0) (auto-assigned by Pixi),
+         * localUniforms @group(1) (Pixi's per-mesh group, carries uTransformMatrix), and our color
+         * group uColorUniforms @group(2) — see the contract note above. */
         const wgslUniforms = /* wgsl */ `
             struct GlobalUniforms {
                 uProjectionMatrix: mat3x3<f32>,
@@ -128,13 +152,20 @@ export class DxfViewerPixi {
                 uResolution: vec2<f32>,
             };
 
+            struct LocalUniforms {
+                uTransformMatrix: mat3x3<f32>,
+                uColor: vec4<f32>,
+                uRound: f32,
+            };
+
             struct ColorUniforms {
                 uLineColor: vec3<f32>,
                 uAlpha: f32,
             };
 
             @group(0) @binding(0) var<uniform> globalUniforms: GlobalUniforms;
-            @group(1) @binding(0) var<uniform> uColorUniforms: ColorUniforms;
+            @group(1) @binding(0) var<uniform> localUniforms: LocalUniforms;
+            @group(2) @binding(0) var<uniform> uColorUniforms: ColorUniforms;
 
             struct VSOutput {
                 @builtin(position) position: vec4<f32>,
@@ -151,6 +182,7 @@ export class DxfViewerPixi {
 
                     uniform mat3 uProjectionMatrix;
                     uniform mat3 uWorldTransformMatrix;
+                    uniform mat3 uTransformMatrix;
                     uniform vec3 uLineColor;
                     uniform float uAlpha;
 
@@ -161,7 +193,7 @@ export class DxfViewerPixi {
                         vColor = uLineColor;
                         vAlpha = uAlpha;
                         vec2 pos = vec2(position);
-                        mat3 mvp = uProjectionMatrix * uWorldTransformMatrix;
+                        mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
                         gl_Position = vec4((mvp * vec3(vec2(pos.x, -pos.y), 1.0)).xy, 0.0, 1.0);
                         gl_PointSize = 2.0;
                     }
@@ -179,7 +211,7 @@ export class DxfViewerPixi {
                                 var out: VSOutput;
                                 out.vColor = uColorUniforms.uLineColor;
                                 out.vAlpha = uColorUniforms.uAlpha;
-                                let mvp = globalUniforms.uProjectionMatrix * globalUniforms.uWorldTransformMatrix;
+                                let mvp = globalUniforms.uProjectionMatrix * globalUniforms.uWorldTransformMatrix * localUniforms.uTransformMatrix;
                                 let clip = (mvp * vec3<f32>(position.x, -position.y, 1.0)).xy;
                                 out.position = vec4<f32>(clip, 0.0, 1.0);
                                 return out;
@@ -201,6 +233,7 @@ export class DxfViewerPixi {
 
                     uniform mat3 uProjectionMatrix;
                     uniform mat3 uWorldTransformMatrix;
+                    uniform mat3 uTransformMatrix;
                     uniform vec3 uLineColor;
                     uniform float uAlpha;
 
@@ -212,7 +245,7 @@ export class DxfViewerPixi {
                         vAlpha = uAlpha;
                         vec2 pos = vec2(position);
                         pos.xy = mat2(positionOffset0[0], positionOffset1[0], positionOffset0[1], positionOffset1[1]) * pos.xy + vec2(positionOffset0[2], positionOffset1[2]);
-                        mat3 mvp = uProjectionMatrix * uWorldTransformMatrix;
+                        mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
                         gl_Position = vec4((mvp * vec3(vec2(pos.x, -pos.y), 1.0)).xy, 0.0, 1.0);
                         gl_PointSize = 2.0;
                     }
@@ -241,7 +274,7 @@ export class DxfViewerPixi {
                                     positionOffset0[1], positionOffset1[1]
                                 );
                                 let pos = xform * position + vec2<f32>(positionOffset0[2], positionOffset1[2]);
-                                let mvp = globalUniforms.uProjectionMatrix * globalUniforms.uWorldTransformMatrix;
+                                let mvp = globalUniforms.uProjectionMatrix * globalUniforms.uWorldTransformMatrix * localUniforms.uTransformMatrix;
                                 let clip = (mvp * vec3<f32>(pos.x, -pos.y, 1.0)).xy;
                                 out.position = vec4<f32>(clip, 0.0, 1.0);
                                 return out;
