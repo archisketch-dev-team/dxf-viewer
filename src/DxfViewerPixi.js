@@ -1,5 +1,5 @@
 import * as three from "three";
-import * as pixi from "pixi.js-legacy";
+import * as pixi from "pixi.js";
 import { BatchingKey } from "./BatchingKey.js";
 import { DxfWorker } from "./DxfWorker.js";
 import { ColorCode, DxfScene } from "./DxfScene.js";
@@ -43,53 +43,250 @@ export class DxfViewerPixi {
         this.clearColor = 0xffffff;
         this.blackWhiteInversion = true;
 
-        // 비인스턴스드 셰이더 생성
-        const fragmentShader = `
-            uniform vec3 uColor;
-            uniform float uAlpha;
-            
+        /* Pixi v8 custom Mesh shaders carry both a WebGL (`gl`, GLSL ES 3.00) and a WebGPU
+         * (`gpu`, WGSL) program so the same Mesh renders under either renderer. planner's main
+         * canvas requests `preference: 'webgpu'` (falling back to webgl), so without the `gpu`
+         * program these Meshes draw nothing on WebGPU.
+         *
+         * Uniform contract is identical across both backends at the data level (consumers stay
+         * renderer-agnostic), but the two Pixi renderers bind uniform groups DIFFERENTLY, so the
+         * shader source must match each backend's convention:
+         *   - globalUniforms (uProjectionMatrix / uWorldTransformMatrix) are supplied by Pixi
+         *     automatically.
+         *       WGSL: a struct var named `globalUniforms` at @group(0) @binding(0). Pixi's
+         *       GpuMeshAdapter sets autoAssignGlobalUniforms and binds its own global UniformGroup
+         *       as that bind group (GpuMeshAdapter.mjs; globalUniformsBit.mjs).
+         *       GL: Pixi's GlMeshAdaptor puts the SAME global UniformGroup at shader.groups[100],
+         *       but that group is NOT a UBO (ubo:false — UniformGroup.defaultOptions.ubo is false
+         *       and GlobalUniformSystem._createUniforms constructs the group without passing a ubo
+         *       option, so the default applies), so Pixi uploads its members as PLAIN uniforms by
+         *       location via GlUniformGroupSystem.updateUniformGroup (GenerateShaderSyncCode.mjs
+         *       non-ubo branch; globalUniformsBitGl declares them as plain `uniform mat3 ...`). A
+         *       GLSL `uniform globalUniforms { ... }` UBO BLOCK therefore gets no buffer bound and
+         *       no per-location upload -> block stays unbound ("used but unbound uniform buffer",
+         *       0 lines drawn). So the GL program must declare uProjectionMatrix /
+         *       uWorldTransformMatrix as plain uniforms, not a block.
+         *   - localUniforms (uTransformMatrix / uColor / uRound) is Pixi's PER-MESH group, carrying
+         *     each Mesh's groupTransform (= the accumulated world transform of its container, e.g.
+         *     OverlayDxf2's `dxfContainer.position.set(origin.x, -origin.y)`). MeshPipe.execute sets
+         *     `localUniforms.uniforms.uTransformMatrix = mesh.groupTransform` for EVERY mesh, custom
+         *     shader included (MeshPipe.mjs). globalUniforms.uWorldTransformMatrix only holds the
+         *     render-group transform, NOT individual container transforms (GlobalUniformSystem.bind),
+         *     so a shader that reads only the globals ignores the per-mesh transform and renders the
+         *     DXF offset by `origin` from where snapContext places its snap points (which OverlayDxf2
+         *     builds in world space by adding origin). The clip transform must therefore be
+         *     `uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix`.
+         *       WGSL: a struct var named `localUniforms` at @group(1) @binding(0) whose layout
+         *       MATCHES Pixi's own (uTransformMatrix: mat3x3, uColor: vec4, uRound: f32 — MeshPipe
+         *       localUniforms). GpuMeshAdapter sets autoAssignLocalUniforms (true because layout[1]
+         *       is named `localUniforms`) and binds Pixi's localUniforms UniformGroup as that bind
+         *       group (GpuMeshAdapter.mjs; GpuProgram.mjs autoAssignLocalUniforms). The fork reads
+         *       only uTransformMatrix; uColor/uRound are declared to match the struct but unused.
+         *       GL: GlMeshAdaptor.execute unconditionally binds Pixi's localUniforms group at
+         *       shader.groups[101] (even for a custom shader), uploaded as PLAIN uniforms by name
+         *       (localUniformBitGl declares `uniform mat3 uTransformMatrix`), so the GL program
+         *       declares `uniform mat3 uTransformMatrix` and reads it directly.
+         *   - uColorUniforms (uLineColor + uAlpha) is our per-draw color group (see _CreateObjects),
+         *     passed as `resources.uColorUniforms` = a plain (ubo:false) UniformGroup.
+         *       WGSL: @group(2) @binding(0) — moved off @group(1) because that group is now Pixi's
+         *       auto-assigned localUniforms (above). group(2) is free (the fork binds no texture, so
+         *       Pixi's texture group is unused). Bound explicitly by Pixi because the resource name
+         *       `uColorUniforms` matches the WGSL var (Shader.mjs resources path), not auto-assigned.
+         *       GL: same non-ubo path as above — uLineColor / uAlpha are plain uniforms uploaded
+         *       by location, so the GL program declares them as plain uniforms too (no block). GL has
+         *       no bind-group concept, so the color group's WGSL group number does not affect GL.
+         *     NAMING: the per-draw color uniform is `uLineColor`, NOT `uColor`. GlMeshAdaptor.execute
+         *     unconditionally binds Pixi's own localUniforms group at shader.groups[101] even for a
+         *     custom mesh shader, and that group declares `uColor` as a vec4<f32> (MeshPipe.mjs
+         *     localUniforms). generateUniformsSync resolves uniform locations by active-uniform NAME,
+         *     so a fork `uniform vec3 uColor` would share the location Pixi uploads `gl.uniform4f` to
+         *     every draw -> GL_INVALID_OPERATION (vec3 location, vec4 upload). Renaming to uLineColor
+         *     avoids the reserved localUniforms name. uProjectionMatrix / uWorldTransformMatrix are
+         *     also Pixi reserved names (globalUniforms) but reused DELIBERATELY — the fork reads those
+         *     exact globals, matching type (mat3). uAlpha is NOT a Pixi reserved name and is mutated
+         *     at runtime by consumers (opacity) via
+         *     `mesh.shader.resources.uColorUniforms.uniforms.uAlpha` — unchanged by renderer.
+         *
+         * Vertex attributes map by @location: position=0 (standard + instanced),
+         * positionOffset0=1, positionOffset1=2 (instanced only). GL binds attributes by name;
+         * WGSL binds by location, which Pixi reads from the entry-point struct
+         * (extractAttributesFromGpuProgram.mjs).
+         *
+         * Y-flip (pos.y negated) matches the GL program. gl_PointSize = 2.0 (used by `point-list`
+         * topology for DXF POINT entities) has NO WGSL/WebGPU equivalent — point-list primitives
+         * are always 1px. Points therefore render 1px under WebGPU; see report / _CreateObjects.
+         */
+        const fragmentShader = /* glsl */ `#version 300 es
+            in float vAlpha;
+            in vec3 vColor;
+            out vec4 fragColor;
+
             void main() {
-                gl_FragColor = vec4(uColor * uAlpha, uAlpha);
+                fragColor = vec4(vColor * vAlpha, vAlpha);
             }
-        `
+        `;
+
+        /* WGSL fragment: shared by both standard and instanced programs. Reads interpolated
+         * vColor/vAlpha from the vertex stage; premultiplies alpha like the GL path. */
+        const wgslFragment = /* wgsl */ `
+            struct VSOutput {
+                @builtin(position) position: vec4<f32>,
+                @location(0) vColor: vec3<f32>,
+                @location(1) vAlpha: f32,
+            };
+
+            @fragment
+            fn mainFrag(in: VSOutput) -> @location(0) vec4<f32> {
+                return vec4<f32>(in.vColor * in.vAlpha, in.vAlpha);
+            }
+        `;
+
+        /* WGSL uniform blocks (shared header). globalUniforms @group(0) (auto-assigned by Pixi),
+         * localUniforms @group(1) (Pixi's per-mesh group, carries uTransformMatrix), and our color
+         * group uColorUniforms @group(2) — see the contract note above. */
+        const wgslUniforms = /* wgsl */ `
+            struct GlobalUniforms {
+                uProjectionMatrix: mat3x3<f32>,
+                uWorldTransformMatrix: mat3x3<f32>,
+                uWorldColorAlpha: vec4<f32>,
+                uResolution: vec2<f32>,
+            };
+
+            struct LocalUniforms {
+                uTransformMatrix: mat3x3<f32>,
+                uColor: vec4<f32>,
+                uRound: f32,
+            };
+
+            struct ColorUniforms {
+                uLineColor: vec3<f32>,
+                uAlpha: f32,
+            };
+
+            @group(0) @binding(0) var<uniform> globalUniforms: GlobalUniforms;
+            @group(1) @binding(0) var<uniform> localUniforms: LocalUniforms;
+            @group(2) @binding(0) var<uniform> uColorUniforms: ColorUniforms;
+
+            struct VSOutput {
+                @builtin(position) position: vec4<f32>,
+                @location(0) vColor: vec3<f32>,
+                @location(1) vAlpha: f32,
+            };
+        `;
+
         this.shader = {
-            standard: pixi.Program.from(
-                // vertex shader
-                `
-                    attribute vec2 position;
-                    uniform mat3 translationMatrix;
-                    uniform mat3 projectionMatrix;
-                    
+            standard: {
+                gl: {
+                    vertex: /* glsl */ `#version 300 es
+                    in vec2 position;
+
+                    uniform mat3 uProjectionMatrix;
+                    uniform mat3 uWorldTransformMatrix;
+                    uniform mat3 uTransformMatrix;
+                    uniform vec3 uLineColor;
+                    uniform float uAlpha;
+
+                    out float vAlpha;
+                    out vec3 vColor;
+
                     void main() {
+                        vColor = uLineColor;
+                        vAlpha = uAlpha;
                         vec2 pos = vec2(position);
-                        mat3 mvp = projectionMatrix * translationMatrix;
+                        mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
                         gl_Position = vec4((mvp * vec3(vec2(pos.x, -pos.y), 1.0)).xy, 0.0, 1.0);
                         gl_PointSize = 2.0;
                     }
                 `,
-                fragmentShader
-            ),
-            // 인스턴스드 셰이더 생성
-            instanced: pixi.Program.from(
-                // vertex shader
-                `
-                    attribute vec2 position;
-                    attribute vec3 positionOffset0;
-                    attribute vec3 positionOffset1;
-    
-                    uniform mat3 translationMatrix;
-                    uniform mat3 projectionMatrix;
-                    
+                    fragment: fragmentShader,
+                },
+                gpu: {
+                    vertex: {
+                        entryPoint: "mainVert",
+                        source: /* wgsl */ `
+                            ${wgslUniforms}
+
+                            @vertex
+                            fn mainVert(@location(0) position: vec2<f32>) -> VSOutput {
+                                var out: VSOutput;
+                                out.vColor = uColorUniforms.uLineColor;
+                                out.vAlpha = uColorUniforms.uAlpha;
+                                let mvp = globalUniforms.uProjectionMatrix * globalUniforms.uWorldTransformMatrix * localUniforms.uTransformMatrix;
+                                let clip = (mvp * vec3<f32>(position.x, -position.y, 1.0)).xy;
+                                out.position = vec4<f32>(clip, 0.0, 1.0);
+                                return out;
+                            }
+                        `,
+                    },
+                    fragment: {
+                        entryPoint: "mainFrag",
+                        source: wgslFragment,
+                    },
+                },
+            },
+            instanced: {
+                gl: {
+                    vertex: /* glsl */ `#version 300 es
+                    in vec2 position;
+                    in vec3 positionOffset0;
+                    in vec3 positionOffset1;
+
+                    uniform mat3 uProjectionMatrix;
+                    uniform mat3 uWorldTransformMatrix;
+                    uniform mat3 uTransformMatrix;
+                    uniform vec3 uLineColor;
+                    uniform float uAlpha;
+
+                    out float vAlpha;
+                    out vec3 vColor;
+
                     void main() {
+                        vColor = uLineColor;
+                        vAlpha = uAlpha;
                         vec2 pos = vec2(position);
                         pos.xy = mat2(positionOffset0[0], positionOffset1[0], positionOffset0[1], positionOffset1[1]) * pos.xy + vec2(positionOffset0[2], positionOffset1[2]);
-                        mat3 mvp = projectionMatrix * translationMatrix;
+                        mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
                         gl_Position = vec4((mvp * vec3(vec2(pos.x, -pos.y), 1.0)).xy, 0.0, 1.0);
                         gl_PointSize = 2.0;
                     }
                 `,
-                fragmentShader
-            )
+                    fragment: fragmentShader,
+                },
+                gpu: {
+                    vertex: {
+                        entryPoint: "mainVert",
+                        source: /* wgsl */ `
+                            ${wgslUniforms}
+
+                            @vertex
+                            fn mainVert(
+                                @location(0) position: vec2<f32>,
+                                @location(1) positionOffset0: vec3<f32>,
+                                @location(2) positionOffset1: vec3<f32>,
+                            ) -> VSOutput {
+                                var out: VSOutput;
+                                out.vColor = uColorUniforms.uLineColor;
+                                out.vAlpha = uColorUniforms.uAlpha;
+                                /* Column-major mat2 matching the GL mat2(a,b,c,d) ctor:
+                                 * column0 = (off0.x, off1.x), column1 = (off0.y, off1.y). */
+                                let xform = mat2x2<f32>(
+                                    positionOffset0[0], positionOffset1[0],
+                                    positionOffset0[1], positionOffset1[1]
+                                );
+                                let pos = xform * position + vec2<f32>(positionOffset0[2], positionOffset1[2]);
+                                let mvp = globalUniforms.uProjectionMatrix * globalUniforms.uWorldTransformMatrix * localUniforms.uTransformMatrix;
+                                let clip = (mvp * vec3<f32>(pos.x, -pos.y, 1.0)).xy;
+                                out.position = vec4<f32>(clip, 0.0, 1.0);
+                                return out;
+                            }
+                        `,
+                    },
+                    fragment: {
+                        entryPoint: "mainFrag",
+                        source: wgslFragment,
+                    },
+                },
+            },
         };
 
         this.snapContext = {
@@ -231,7 +428,7 @@ export class DxfViewerPixi {
             this.worker.Destroy(true);
             this.worker = null;
         }
-        this.scene.children = []; // pixi counterpart
+        this.scene.removeChildren(); // pixi counterpart
         for (const layer of this.layers.values()) {
             layer.Dispose();
         }
@@ -809,28 +1006,28 @@ class Batch {
 
             const transformedColor = this.viewer._TransformColor(color);
 
-            const r = (((transformedColor >> 16) & 0xff) / 255).toFixed(6);
-            const g = (((transformedColor >> 8) & 0xff) / 255).toFixed(6);
-            const b = ((transformedColor & 0xff) / 255).toFixed(6);
+            const r = ((transformedColor >> 16) & 0xff) / 255;
+            const g = ((transformedColor >> 8) & 0xff) / 255;
+            const b = (transformedColor & 0xff) / 255;
 
-        let draw_mode;
+        let topology;
         switch (this.key.geometryType) {
             case BatchingKey.GeometryType.POINTS:
             case BatchingKey.GeometryType.POINT_INSTANCE:
-                draw_mode = pixi.DRAW_MODES.POINTS;
+                topology = "point-list";
 
                 // POINT에 instanceBatch가 있는 경우는 없었음.
                 this._AddSnapPoints(this.vertices, instanceBatch);
                 break;
             case BatchingKey.GeometryType.LINES:
             case BatchingKey.GeometryType.INDEXED_LINES:
-                draw_mode = pixi.DRAW_MODES.LINES;
+                topology = "line-list";
 
                 this._AddSnapLines(this.vertices, this.chunks, instanceBatch);
                 break;
             case BatchingKey.GeometryType.TRIANGLES:
             case BatchingKey.GeometryType.INDEXED_TRIANGLES:
-                draw_mode = pixi.DRAW_MODES.TRIANGLES;
+                topology = "triangle-list";
 
                 if (this.chunks) {
                     this.chunks.forEach(chunk => {
@@ -843,67 +1040,97 @@ class Batch {
                 break;
         }
 
-        const shaderProgram = instanceBatch ? this.viewer.shader.instanced : this.viewer.shader.standard;
-        const shader = new pixi.Shader(shaderProgram, {
-            uColor: [r, g, b],
-            uAlpha: 1.0,
+        const shaderSource = instanceBatch ? this.viewer.shader.instanced : this.viewer.shader.standard;
+        /* shaderSource carries both `gl` (GLSL) and `gpu` (WGSL) programs; spread so Pixi picks
+         * the one matching the active renderer. Per-draw color/alpha are supplied through a
+         * uniform group bound to the `uColorUniforms` block declared in both programs. uAlpha is
+         * mutated at runtime by consumers (opacity control) via
+         * `mesh.shader.resources.uColorUniforms.uniforms.uAlpha`.
+         */
+        const shader = pixi.Shader.from({
+            ...shaderSource,
+            resources: {
+                uColorUniforms: new pixi.UniformGroup({
+                    uLineColor: { value: [r, g, b], type: "vec3<f32>" },
+                    uAlpha: { value: 1.0, type: "f32" },
+                }),
+            },
         });
 
         function CreateObject(vertices, indices) {
-            if (draw_mode == null) {
+            if (topology == null) {
                 const empty = new pixi.Sprite(pixi.Texture.EMPTY);
                 return empty;
             }
-            const geometry = new pixi.Geometry();
-            geometry.addAttribute(
-                "position",
-                vertices.array,
-                2,
-                false,
-                pixi.TYPES.FLOAT
-            );
-            if (indices) {
-                geometry.addIndex(indices.array);
-            }
+
+            const attributes = {
+                position: {
+                    buffer: vertices.array,
+                    format: "float32x2",
+                },
+            };
+
+            let instanceCount;
             if (instanceBatch) {
-                let offsetBuffer;
+                let offsetArray;
                 if (instanceBatch.transforms) {
-                    geometry.instanceCount = instanceBatch.transforms.count;
-                    offsetBuffer = new pixi.Buffer(
-                        instanceBatch.transforms.array
-                    );
+                    instanceCount = instanceBatch.transforms.count;
+                    offsetArray = instanceBatch.transforms.array;
                 } else if (instanceBatch.transforms0) {
-                    geometry.instanceCount = instanceBatch.transforms0.data.count;
-                    offsetBuffer = new pixi.Buffer(
-                        instanceBatch.transforms0.data.array
-                    );
+                    instanceCount = instanceBatch.transforms0.data.count;
+                    offsetArray = instanceBatch.transforms0.data.array;
                 }
 
-                if (offsetBuffer) {
-                    geometry.addAttribute(
-                        "positionOffset0",
-                        offsetBuffer,
-                        3,
-                        false,
-                        pixi.TYPES.FLOAT,
-                        6 * Float32Array.BYTES_PER_ELEMENT,
-                        0,
-                        true
-                    );
-                    geometry.addAttribute(
-                        "positionOffset1",
-                        offsetBuffer,
-                        3,
-                        false,
-                        pixi.TYPES.FLOAT,
-                        6 * Float32Array.BYTES_PER_ELEMENT,
-                        3 * Float32Array.BYTES_PER_ELEMENT,
-                        true
-                    );
+                if (offsetArray) {
+                    /* The two instance attributes interleave into a single shared buffer:
+                     * 6 floats per instance (two 3-float vectors). */
+                    const offsetBuffer = new pixi.Buffer({
+                        data: offsetArray,
+                        usage: pixi.BufferUsage.VERTEX,
+                    });
+                    attributes.positionOffset0 = {
+                        buffer: offsetBuffer,
+                        format: "float32x3",
+                        stride: 6 * Float32Array.BYTES_PER_ELEMENT,
+                        offset: 0,
+                        instance: true,
+                    };
+                    attributes.positionOffset1 = {
+                        buffer: offsetBuffer,
+                        format: "float32x3",
+                        stride: 6 * Float32Array.BYTES_PER_ELEMENT,
+                        offset: 3 * Float32Array.BYTES_PER_ELEMENT,
+                        instance: true,
+                    };
                 }
             }
 
-            return new pixi.Mesh(geometry, shader, null, draw_mode);
+            /* WebGPU requires GPUBuffer sizes to be a multiple of 4 when created with
+             * mappedAtCreation (Pixi always does for index/vertex data — see Buffer.descriptor
+             * + GpuBufferSystem.createGPUBuffer, which do NOT round the size up). A Uint16 index
+             * buffer with an odd element count has a byteLength of 2 (mod 4), so createBuffer
+             * throws "size is not a multiple of 4". WebGL has no such constraint, which is why
+             * this only surfaces under the WebGPU renderer. Pad the index data to a 4-byte
+             * boundary and tell the geometry how many indices to actually draw via indexCount, so
+             * the pad element is never rendered. This is renderer-agnostic: both GpuEncoderSystem
+             * (drawIndexed) and GlGeometrySystem (drawElements) resolve the draw count as
+             * `size || geometry.indexCount || indexBuffer.data.length`. */
+            const indexArray = indices
+                ? AlignIndexBufferTo4Bytes(indices.array)
+                : undefined;
+
+            const geometry = new pixi.Geometry({
+                attributes,
+                indexBuffer: indexArray,
+                topology,
+                instanceCount: instanceCount ?? 1,
+            });
+            if (indices) {
+                /* Real index count — guards against the padding element being drawn. */
+                geometry.indexCount = indices.array.length;
+            }
+
+            return new pixi.Mesh({ geometry, shader });
         }
 
         if (this.chunks) {
@@ -961,7 +1188,8 @@ class Layer {
 
     Dispose() {
         for (const obj of this.objects) {
-            obj.geometry.dispose();
+            /* EMPTY-sprite placeholders (null draw topology) have no geometry. */
+            obj.geometry?.destroy();
         }
         this.objects = null;
     }
@@ -980,6 +1208,26 @@ class Block {
 
 /** Custom viewer event names are prefixed with this string. */
 const EVENT_NAME_PREFIX = "__dxf_";
+
+/**
+ * Pad a Uint16 index array so its byteLength is a multiple of 4, as WebGPU requires for a
+ * GPUBuffer created with `mappedAtCreation` (which Pixi always uses for geometry data). An odd
+ * element count makes the byteLength 2 (mod 4); appending one zero element rounds it up. Even
+ * counts (and non-Uint16 arrays, whose element size already divides 4) are returned unchanged so
+ * no copy is made. The appended element is never drawn because the caller sets
+ * `geometry.indexCount` to the real index count. Pure function.
+ * @param {Uint16Array|Uint32Array} indexArray
+ * @return {Uint16Array|Uint32Array}
+ */
+function AlignIndexBufferTo4Bytes(indexArray) {
+    if (indexArray.byteLength % 4 === 0) {
+        return indexArray;
+    }
+    /* Only an odd-length Uint16Array reaches here (2 bytes/element). */
+    const padded = new Uint16Array(indexArray.length + 1);
+    padded.set(indexArray);
+    return padded;
+}
 
 /** Transform sRGB color component to linear color space. */
 function LinearColor(c) {
